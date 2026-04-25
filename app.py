@@ -35,11 +35,18 @@ load_dotenv()
 # ── LLM Config ──────────────────────────────────────────────────────────────
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME", "openai/gpt-oss-120b")
+SPLIT_BRAIN_MODEL = os.getenv("SPLIT_BRAIN_MODEL", "")  # GRPO fine-tuned model for split_brain
 API_KEY      = os.getenv("HF_TOKEN", "").strip().strip('"').strip("'")
 
 if API_KEY:
-    llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    llm_client = OpenAI(
+        base_url=API_BASE_URL, 
+        api_key=API_KEY,
+        timeout=300.0  
+    )
     print(f"[INFO] LLM ready. Token: {API_KEY[:6]}... Model: {MODEL_NAME}")
+    # llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    # print(f"[INFO] LLM ready. Token: {API_KEY[:6]}... Model: {MODEL_NAME}")
 else:
     llm_client = None
     print("[WARN] HF_TOKEN not set — LLM calls will fail.")
@@ -229,9 +236,15 @@ EXAMPLE:
 {{"action_type": "kill_job", "target_id": "job_rogue_99"}}
 """
 
+    # Auto-select model: use fine-tuned LoRA model for split_brain if available
+    active_model = MODEL_NAME
+    if body.agent_id == "split_brain" and SPLIT_BRAIN_MODEL:
+        active_model = SPLIT_BRAIN_MODEL
+        print(f"[INFO] Using fine-tuned model: {active_model}")
+
     try:
         completion = llm_client.chat.completions.create(
-            model=MODEL_NAME,
+            model=active_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
@@ -240,7 +253,7 @@ EXAMPLE:
             max_tokens=400,
         )
         raw_text = completion.choices[0].message.content or ""
-        print(f"[DEBUG LLM TEXT] {raw_text}")
+        print(f"[DEBUG LLM ({active_model})] {raw_text}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM call failed: {str(e)}")
 
