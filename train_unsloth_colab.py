@@ -93,13 +93,23 @@ TASK_MAX_STEPS = {
 
 # Curriculum: (task_id, grpo_steps, num_prompts)
 # num_prompts kept modest — quality of reward signal matters more than quantity
+# CURRICULUM = [
+#     ("partition_basic",    60,  80),
+#     ("replication_storm",  70,  100),
+#     ("split_brain",        80,  120),
+#     ("cascading_deadlock", 80,  120),
+#     ("regional_wipeout",   80,  140),
+# ]
+
+# ── SMOKE TEST CONFIG (10-minute run) ─────────────────────────────────────────
 CURRICULUM = [
-    ("partition_basic",    60,  80),
-    ("replication_storm",  70,  100),
-    ("split_brain",        80,  120),
-    ("cascading_deadlock", 80,  120),
-    ("regional_wipeout",   80,  140),
+    ("partition_basic",    5,  10),
+    ("replication_storm",  5,  10),
+    ("split_brain",        5,  10),
+    ("cascading_deadlock", 5,  10),
+    ("regional_wipeout",   5,  10),
 ]
+# ──────────────────────────────────────────────────────────────────────────────
 
 TASK_LABELS = {
     "partition_basic":    "Partition\nBasic",
