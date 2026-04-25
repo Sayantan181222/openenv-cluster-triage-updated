@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install PyTorch from the official CUDA 12.1 wheel index to avoid any Conda conflicts
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 
 # Install Unsloth and other dependencies
 RUN pip install --no-cache-dir \
@@ -32,8 +32,9 @@ RUN pip install --no-cache-dir \
         python-dotenv \
         huggingface_hub \
         openai \
-        xformers \
-        bitsandbytes
+        bitsandbytes \
+        "xformers==0.0.28.post3" \
+        torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1
 
 # Copy repo source
 COPY . .
