@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install Python packages
 # Note: unsloth must be installed from source for latest GRPO support
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --upgrade torch torchvision torchaudio && \
     pip install --no-cache-dir \
         "unsloth @ git+https://github.com/unslothai/unsloth.git" \
         trl \
@@ -30,9 +31,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
         huggingface_hub \
         openai \
         xformers \
-        bitsandbytes \
-        torchvision \
-        torchaudio
+        bitsandbytes
 
 # Copy repo source
 COPY . .
