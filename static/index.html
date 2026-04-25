@@ -1078,13 +1078,13 @@ function apiTest(path, method, body) {
   });
 }
 function apiTestTasks() {
-  apiTest('/tasks?agent_id=' + (selectedAgentId || 'cluster_triage'), 'GET');
+  apiTest('/tasks?agent_id=' + (selectedAgentId || 'split_brain'), 'GET');
 }
 function apiTestReset() {
-  apiTest('/reset', 'POST', { agent_id: selectedAgentId || 'cluster_triage', task: selectedTaskId || 'easy' });
+  apiTest('/reset', 'POST', { agent_id: selectedAgentId || 'split_brain', task: selectedTaskId || 'partition_basic' });
 }
 function apiTestAgentStep() {
-  apiTest('/agent/step', 'POST', { agent_id: selectedAgentId || 'cluster_triage', task: selectedTaskId || 'easy' });
+  apiTest('/agent/step', 'POST', { agent_id: selectedAgentId || 'split_brain', task: selectedTaskId || 'partition_basic' });
 }
 
 /* ════════════════════════════════════════════════════

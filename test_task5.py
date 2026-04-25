@@ -1,5 +1,5 @@
 from agents.split_brain.environment import SplitBrainEnv
-from app import _extract_action, MODEL_NAME, llm_client
+from app import MODEL_NAME, llm_client
 import json
 import re
 

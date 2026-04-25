@@ -1,29 +1,29 @@
 ---
-title: OpenEnv Cluster Triage
-emoji: 🚀
-colorFrom: gray
+title: OpenEnv Split-Brain Collapse
+emoji: 🧠
+colorFrom: indigo
 colorTo: red
 sdk: docker
 pinned: false
 license: mit
 ---
 
-# 🚀 OpenEnv: Distributed Data Cluster Triage (Enterprise 4-Node)
+# 🧠 OpenEnv: Split-Brain Collapse (Three-Datacenter Crisis)
 
 ## 📖 Overview & Motivation
-Managing a distributed data processing cluster (e.g., Hadoop/HDFS) is a complex, high-stakes DevOps challenge. When compute resources are finite, runaway jobs and hardware constraints can cause cascading failures that require immediate, multi-step human intervention.
+Managing a distributed database cluster spanning multiple datacenters is one of the hardest challenges in Site Reliability Engineering. When network partitions occur between datacenters, competing nodes may each believe they are the authoritative primary — a **split-brain** state that leads to data divergence, replication storms, and cascading deadlocks that require precise, ordered multi-step intervention.
 
-This OpenEnv simulates an enterprise-level 4-node cluster under stress. It is a genuine infrastructure triage scenario. An AI agent acting as an automated Site Reliability Engineer (SRE) must observe the cluster's telemetry dashboard, identify root causes of failures, and issue precise terminal commands to prevent total system collapse.
+This OpenEnv simulates a three-datacenter enterprise infrastructure under a cascading split-brain crisis. It is a genuine multi-agent RL scenario. An AI team consisting of an **orchestrator**, a **netops** specialist, and a **dba** specialist must collaborate to restore connectivity, elect a single primary, reconcile diverged write logs, and recover the cluster before data loss becomes permanent.
 
 ---
 
 ## ⚙️ Architecture: How It Works
 This environment is built as a complete, containerized Reinforcement Learning (RL) ecosystem:
 
-1. **The Simulation Engine (`environment.py`):** An OpenEnv-compliant state machine that tracks node health, RAM/Disk usage, active jobs, and enforces strict logic gates (e.g., you cannot restart a node if its disk is full; you must kill Hydra malware before clearing storage).
-2. **The Backend API (`FastAPI`):** Exposes standard programmatic RL endpoints (`/reset`, `/step`, `/state`, `/health`) allowing external scripts and evaluators to interact with the environment headlessly.
-3. **The Web Dashboard (`Gradio`):** Mounted directly on top of the FastAPI server, this provides a dark-mode, 3-column "SRE Command Center" for humans to interactively step through the simulation and watch the LLM make decisions in real-time.
-4. **The Agent (`inference.py` / `OpenAI Client`):** Uses the `deepseek-ai/DeepSeek-R1-Distill-Llama-70B` model via the Hugging Face Serverless API to analyze the observation JSON and output strict, precise JSON action commands.
+1. **The Simulation Engine (`agents/split_brain/environment.py`):** An OpenEnv-compliant multi-agent state machine tracking datacenter health, network link status, replication lag, transaction deadlocks, and enforcing strict logic gates (e.g., you cannot promote a new primary before routing is verified; resolving a deadlock before re-routing re-triggers it).
+2. **The Backend API (`FastAPI`):** Exposes standard programmatic RL endpoints (`/reset`, `/step`, `/state`, `/health`, `/tasks`) allowing external scripts and evaluators to interact with the environment headlessly.
+3. **The Web Dashboard (`static/index.html`):** A dark-mode, multi-panel "SRE Command Center" that auto-discovers agents from `GET /agents` and lets humans interactively step through the simulation watching the LLM make decisions in real-time.
+4. **The Agent (`inference.py` / `OpenAI Client`):** Uses the `deepseek-ai/DeepSeek-R1-Distill-Llama-70B` model via the Hugging Face Serverless API. The environment injects context-aware multi-agent prompts (different system prompts for orchestrator, netops, dba) so the LLM knows which role it is playing each step.
 
 ---
 
@@ -31,32 +31,38 @@ This environment is built as a complete, containerized Reinforcement Learning (R
 The environment strictly adheres to the OpenEnv Pydantic specifications.
 
 ### Observation Space
-The agent receives a `ClusterObservation` detailing the exact state of the infrastructure:
-* **`health_score`**: (Float 0.0 - 1.0) The continuous metric of cluster stability.
-* **`nodes`**: A list of 4 `NodeStatus` objects (worker nodes), detailing CPU, RAM, disk usage, and current status (`healthy`, `high_memory`, `disk_full`, `offline`).
-* **`active_jobs`**: A list of `JobStatus` objects detailing allocated memory and execution states.
-* **`recent_alerts`**: System logs and critical alerts providing context to the failures.
+The agent receives a `SplitBrainObservation` detailing the full three-datacenter state:
+* **`global_health`**: (Float 0.0 – 1.0) Continuous cluster stability metric across all three DCs.
+* **`current_actor`**: Which sub-agent is active this step (`orchestrator`, `netops`, or `dba`).
+* **`dc1_dc2_connected` / `dc2_dc3_connected`**: Network link status between datacenters.
+* **`network_status`**: Overall network state (`partitioned`, `degraded`, `healthy`).
+* **`replication_lag_ms`**: Database replication lag in milliseconds.
+* **`primary_db`**: Which DC currently holds the authoritative primary database.
+* **`datacenters`**: List of 3 `DatacenterStatus` objects — status, node count, load %.
+* **`recent_alerts`**: System log messages and critical alerts.
 
 ### Action Space
-The agent interacts with the environment by outputting a strictly typed `ClusterAction` JSON object:
-* **`action_type`**: The command to execute (`kill_job`, `restart_node`, `clear_temp_storage`, `noop`).
-* **`target_id`**: The specific `job_id` or `node_id` to apply the action to.
+The active sub-agent issues a `SplitBrainAction` JSON object:
+* **`action_type`**: Command to execute — `run_diagnostic`, `update_route`, `verify_routing`, `throttle_bandwidth`, `restore_replica`, `promote_primary`, `force_sync`, `resolve_deadlock`, `failover_region`, `delegate`, `noop`.
+* **`target_id`**: Resource to target (e.g. `dc2_router--dc3_router`, `replica_dc2`).
+* **`target_agent`**: Sub-agent to delegate to (`netops` or `dba`) — only for `delegate` actions.
+* **`instruction_payload`**: Nested action passed to the delegated sub-agent.
 
 ---
 
 ## 🎯 Task Descriptions & Difficulty
-The environment features a 5-tier difficulty scale. It provides a meaningful, continuous reward signal, penalizing destructive actions and rewarding partial progress.
+The environment features a 5-tier difficulty scale with continuous shaped rewards penalising wrong ordering and rewarding correct multi-step sequences.
 
-* **🟢 EASY (The Stuck Job):** A rogue MapReduce job is stuck in an infinite loop. 
-  * *Expected Action:* `kill_job` -> `job_rogue_99`. 
-* **🟡 MEDIUM (The Full Disk):** A worker node's disk has hit 99.9% capacity.
-  * *Expected Sequence:* `clear_temp_storage` -> `restart_node`. 
-* **🟠 HARD (The Cascade Failure):** A rogue job caused a replication storm, crashing Nodes 1 and 2. Failover traffic is overloading Nodes 3 and 4.
-  * *Expected Sequence:* Kill the root job, clear storage on dead nodes, then safely reboot them. (5 steps)
-* **🔴 VERY HARD (Multi-Vector Attack):** A disk-filling log spammer and a RAM-hogging crypto miner hit the cluster simultaneously.
-  * *Expected Sequence:* Isolate and kill both malware jobs before clearing storage and rebooting. (6 steps)
-* **☠️ NIGHTMARE (The Hydra Protocol):** Total cluster collapse. Three self-replicating malware jobs are writing garbage data to all 4 nodes. 
-  * *Expected Sequence:* The agent must kill ALL THREE Hydra jobs before attempting to clear any storage, otherwise, the surviving malware instantly cross-infects and refills the disks. (11 steps)
+* **🟢 BASIC (The Partition):** A single DC1–DC2 link has failed.
+  * *Expected Sequence:* `run_diagnostic` → `update_route` → `verify_routing`.
+* **🟡 STORM (Replication Storm):** A thundering-herd burst has saturated all inter-DC links.
+  * *Expected Sequence:* `throttle_bandwidth` → `restore_replica` × N → `force_sync`.
+* **🔴 SPLIT (The Split-Brain):** Both inter-DC links are down; two competing primaries have diverged.
+  * *Expected Sequence:* Restore both links, isolate one primary, `promote_primary`, reconcile all replicas.
+* **🟣 DEADLOCK (Cascading Deadlock):** A distributed transaction deadlock has frozen all write paths.
+  * *Expected Sequence:* `update_route` → `verify_routing` → `resolve_deadlock` → `force_sync` (strict order).
+* **☠️ WIPEOUT (Regional Wipeout):** DC3 offline, DC1/DC2 in split-brain. Full regional failover required.
+  * *Expected Sequence:* `failover_region` → `promote_primary` → restore all replicas → `verify_routing`.
 
 ---
 
@@ -68,45 +74,44 @@ You can run this project in three different ways depending on your needs.
 The easiest way to evaluate the environment is via the public Hugging Face Space. The UI acts as a step-by-step RL debugger.
 
 1. **Access the Dashboard:** Open the Hugging Face Space URL.
-2. **Select Threat Level:** Use the radio buttons on the left to choose a scenario. The *Active Incident Briefing* will update with your mission constraints.
-3. **Initialize the Environment:** Click the **🔄 Reset** button. This boots up the simulation and populates the *Live Node Status* telemetry grid.
-4. **Deploy the Agent:** Click the purple **▶ AGENT STEP** button. The LLM will evaluate the state and make exactly *one* move. 
-5. **Observe the Triage:** Look at the right-side panel. You will see the agent's command in the Terminal, the resulting Step Reward (+/-), and the dynamic Reward History bar graph update.
-6. **Iterate:** Continue clicking **▶ AGENT STEP** until the terminal declares `SYSTEM NOMINAL`.
+2. **Select Threat Level:** Use the sidebar to choose a task scenario.
+3. **Initialize the Environment:** Click the **🔄 Reset** button to boot the simulation.
+4. **Deploy the Agent:** Click the **▶ AGENT STEP** button. The LLM evaluates the current state and makes exactly *one* move, routing to the correct sub-agent (orchestrator / netops / dba).
+5. **Observe the Triage:** Watch the delegation log, step reward, and datacenter health panel update.
+6. **Iterate:** Continue clicking **▶ AGENT STEP** until the terminal declares `CLUSTER RESTORED`.
 
 ### Method 2: Local Docker (Production Simulation)
 Run the exact containerized environment that Hugging Face uses, locally on your machine.
 
-1. Create a `.env` file in the root directory and add your API credentials:
+1. Create a `.env` file in the root directory:
    ```env
    HF_TOKEN="your_huggingface_token"
    MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Llama-70B"
-   API_BASE_URL="[https://router.huggingface.co/v1](https://router.huggingface.co/v1)"
+   API_BASE_URL="https://router.huggingface.co/v1"
+   SPLIT_BRAIN_MODEL=""  # optional: path to fine-tuned LoRA model
    ```
 2. Build the Docker image:
    ```bash
-   docker build -t cluster-triage-env .
+   docker build -t split-brain-env .
    ```
-3. Run the container (Ensure you map Port 7860 to access the UI):
+3. Run the container:
    ```bash
-   docker run -p 7860:7860 --env-file .env cluster-triage-env
+   docker run -p 7860:7860 --env-file .env split-brain-env
    ```
-4. Open your web browser and navigate to: **`http://localhost:7860`**
+4. Open your browser at: **`http://localhost:7860`**
 
 ### Method 3: Local Python (For Developers)
-If you want to modify the source code, debug, or run the headless terminal script without building a container.
-
 1. Install the required dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-2. Ensure your `.env` file is configured in the root directory (same as Docker step 1).
-3. **To run the Interactive Web Dashboard & API:**
+2. Ensure your `.env` file is configured (same as Docker step 1).
+3. **Run the Interactive Web Dashboard & API:**
    ```bash
    python app.py
    ```
-   *(Access the UI via `http://127.0.0.1:7860` in your browser).*
-4. **To run the Automated Terminal Baseline:**
+   *(Access the UI via `http://127.0.0.1:7860`).*
+4. **Run the Automated Terminal Baseline:**
    ```bash
    python inference.py
    ```
@@ -116,7 +121,7 @@ If you want to modify the source code, debug, or run the headless terminal scrip
 ## 🧬 GRPO Fine-Tuning with Unsloth (LoRA Adapter)
 
 ### The Problem
-When running the **Split-Brain Collapse** agent (Task 4: `cascading_deadlock`) with smaller models like Llama 3.1 8B, the agent gets stuck in an infinite `run_diagnostic` loop — it keeps repeating the same diagnostic action instead of progressing to `update_route`, `verify_routing`, and other repair commands. Larger models (70B+) handle this correctly but are expensive to run.
+When running the **Cascading Deadlock** task (Task 4) with smaller models like Llama 3.1 8B, the agent gets stuck in an infinite `run_diagnostic` loop — it keeps repeating the same diagnostic action instead of progressing to `update_route`, `verify_routing`, and `resolve_deadlock`. Larger models (70B+) handle this correctly but are expensive to run.
 
 ### The Solution: GRPO Reinforcement Learning
 We used **Group Relative Policy Optimization (GRPO)** via [Unsloth](https://github.com/unslothai/unsloth) + [TRL](https://github.com/huggingface/trl) to fine-tune `Llama-3.2-3B-Instruct` directly against the OpenEnv reward function. The training:
@@ -124,7 +129,7 @@ We used **Group Relative Policy Optimization (GRPO)** via [Unsloth](https://gith
 1. Feeds the model the exact stuck scenario (post-diagnostic delegation to netops)
 2. Generates multiple candidate actions via sampling
 3. Steps each action through the live `SplitBrainEnv.step()` function
-4. Rewards correct actions (e.g., `update_route`) and **penalizes** repeated diagnostics
+4. Rewards correct actions (e.g., `update_route`) and **penalises** repeated diagnostics
 5. The model learns to break out of loops and follow multi-step repair sequences
 
 ### Training Script

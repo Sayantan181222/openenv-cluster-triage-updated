@@ -1,4 +1,4 @@
-from app import llm_client, MODEL_NAME, _extract_action
+from app import llm_client, MODEL_NAME
 from agents.split_brain.environment import SplitBrainEnv
 env = SplitBrainEnv()
 env.reset("split_brain")

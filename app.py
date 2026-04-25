@@ -1,6 +1,6 @@
 """
-app.py — OpenEnv Cluster Triage Environment
-============================================
+app.py — OpenEnv Split-Brain Collapse Environment
+==================================================
 Serves:
   • FastAPI HTTP API  — /reset, /step, /state, /health, /tasks
   • Agent endpoints   — /agents, /agent/step
@@ -14,8 +14,6 @@ ARCHITECTURE:
 """
 
 import os
-import json
-import re
 from dotenv import load_dotenv
 from typing import Optional
 
@@ -27,32 +25,28 @@ import uvicorn
 from openai import OpenAI
 
 from agents import AGENT_REGISTRY
-from agents.cluster_triage.models import ClusterAction, ResetRequest
 from agents.split_brain.models import SplitBrainAction
 
 load_dotenv()
 
 # ── LLM Config ──────────────────────────────────────────────────────────────
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME", "openai/gpt-oss-120b")
-SPLIT_BRAIN_MODEL = os.getenv("SPLIT_BRAIN_MODEL", "")  # GRPO fine-tuned model for split_brain
-API_KEY      = os.getenv("HF_TOKEN", "").strip().strip('"').strip("'")
+API_BASE_URL      = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME        = os.getenv("MODEL_NAME", "openai/gpt-oss-120b")
+SPLIT_BRAIN_MODEL = os.getenv("SPLIT_BRAIN_MODEL", "")  # GRPO fine-tuned LoRA model
+API_KEY           = os.getenv("HF_TOKEN", "").strip().strip('"').strip("'")
 
 if API_KEY:
     llm_client = OpenAI(
-        base_url=API_BASE_URL, 
+        base_url=API_BASE_URL,
         api_key=API_KEY,
-        timeout=300.0  
+        timeout=300.0,
     )
     print(f"[INFO] LLM ready. Token: {API_KEY[:6]}... Model: {MODEL_NAME}")
-    # llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    # print(f"[INFO] LLM ready. Token: {API_KEY[:6]}... Model: {MODEL_NAME}")
 else:
     llm_client = None
     print("[WARN] HF_TOKEN not set — LLM calls will fail.")
 
 # ── Active Environment State ─────────────────────────────────────────────────
-# Tracks which agent is currently loaded. Reset swaps the env.
 active_agent_id = None
 active_env      = None
 
@@ -62,7 +56,10 @@ def get_or_create_env(agent_id: str):
     global active_agent_id, active_env
     agent = AGENT_REGISTRY.get(agent_id)
     if not agent:
-        raise HTTPException(status_code=400, detail=f"Unknown agent '{agent_id}'. Available: {list(AGENT_REGISTRY.keys())}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown agent '{agent_id}'. Available: {list(AGENT_REGISTRY.keys())}",
+        )
     if active_agent_id != agent_id:
         active_agent_id = agent_id
         active_env = agent["env_class"]()
@@ -71,11 +68,12 @@ def get_or_create_env(agent_id: str):
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 fastapi_app = FastAPI(
-    title="OpenEnv: Distributed Cluster Triage",
+    title="OpenEnv: Split-Brain Collapse",
     description=(
-        "An OpenEnv-compliant RL environment simulating a 4-node enterprise "
-        "data cluster. An AI agent acting as an SRE must triage infrastructure "
-        "failures by issuing precise commands."
+        "An OpenEnv-compliant multi-agent RL environment simulating a "
+        "three-datacenter split-brain network partition crisis. "
+        "AI agents acting as orchestrator, netops, and dba must collaboratively "
+        "resolve network partitions, replication storms, and cascading deadlocks."
     ),
     version="1.0.0",
 )
@@ -89,61 +87,64 @@ fastapi_app = FastAPI(
 def health():
     """Health check — returns 200 OK."""
     return {
-        "status": "ok",
-        "env": "cluster-triage",
-        "version": "1.0.0",
+        "status":       "ok",
+        "env":          "split-brain",
+        "version":      "1.0.0",
         "llm_configured": bool(API_KEY),
-        "model": MODEL_NAME,
+        "model":        MODEL_NAME,
     }
 
 
 @fastapi_app.post("/reset")
-def reset(request: ResetRequest = None):
+async def reset(request: Request):
     """
     Reset the environment for a given task.
-    Body: {"task": "easy", "agent_id": "cluster_triage"}
+    Body: {"task": "partition_basic", "agent_id": "split_brain"}
     """
-    agent_id = getattr(request, "agent_id", None) or "cluster_triage"
-    task     = (request.task if request else "easy")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    agent_id = body.get("agent_id", "split_brain")
+    task     = body.get("task", "partition_basic")
     env      = get_or_create_env(agent_id)
     agent    = AGENT_REGISTRY[agent_id]
     valid    = [t["id"] for t in agent["tasks"]]
     if task not in valid:
-        raise HTTPException(status_code=400, detail=f"Unknown task '{task}'. Valid: {valid}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown task '{task}'. Valid: {valid}",
+        )
     obs = env.reset(task=task)
     return JSONResponse(content=obs.model_dump())
 
 
 @fastapi_app.post("/step")
 async def step(request: Request):
-    """Execute one raw action in the environment (generic — routes by active agent)."""
+    """Execute one raw action in the environment."""
     if active_env is None:
         raise HTTPException(status_code=400, detail="No environment loaded. Call /reset first.")
-    body = await request.json()
-    if active_agent_id == "split_brain":
-        action = SplitBrainAction(**body)
-    else:
-        action = ClusterAction(**body)
+    body   = await request.json()
+    action = SplitBrainAction(**body)
     result = active_env.step(action)
     return JSONResponse(content=result.model_dump())
 
 
 @fastapi_app.get("/state")
 def state():
-    """Return the current cluster observation without advancing the episode."""
+    """Return the current observation without advancing the episode."""
     if active_env is None:
         raise HTTPException(status_code=400, detail="No environment loaded. Call /reset first.")
     return JSONResponse(content=active_env.state().model_dump())
 
 
 @fastapi_app.get("/tasks")
-def list_tasks(agent_id: str = "cluster_triage"):
+def list_tasks(agent_id: str = "split_brain"):
     """List all available tasks with difficulty metadata for a specific agent."""
     if agent_id not in AGENT_REGISTRY:
         raise HTTPException(status_code=404, detail="Agent not found.")
-    
-    agent_meta = AGENT_REGISTRY[agent_id]
-    return {"tasks": agent_meta["tasks"]}
+    return {"tasks": AGENT_REGISTRY[agent_id]["tasks"]}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -174,31 +175,15 @@ def list_agents():
 # ══════════════════════════════════════════════════════════════════════════════
 
 class AgentStepRequest(BaseModel):
-    agent_id: str = Field("cluster_triage", description="Which agent (environment) to step")
-    task: Optional[str] = Field(None, description="Task hint (set via /reset)")
-
-
-def _extract_action(response_text: str) -> ClusterAction:
-    """Parse LLM output into a ClusterAction, stripping reasoning blocks."""
-    text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
-    text = text.replace("```json", "").replace("```", "").strip()
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match:
-        try:
-            data = json.loads(match.group(0))
-            if "action_type" in data:
-                return ClusterAction(**data)
-        except Exception:
-            pass
-    return ClusterAction(action_type="noop", target_id="none")
+    agent_id: str          = Field("split_brain", description="Which agent (environment) to step")
+    task:     Optional[str] = Field(None, description="Task hint (set via /reset)")
 
 
 @fastapi_app.post("/agent/step")
 def agent_step(body: AgentStepRequest):
     """
-    Run ONE LLM-powered step on the active environment.
-    Supports both single-agent (cluster_triage) and multi-agent (split_brain) modes.
-    For split_brain, the system prompt changes based on the current_actor.
+    Run ONE LLM-powered step on the active Split-Brain environment.
+    The environment provides its own multi-agent prompts via get_llm_prompts().
     """
     if not llm_client:
         raise HTTPException(status_code=503, detail="HF_TOKEN not configured.")
@@ -206,41 +191,17 @@ def agent_step(body: AgentStepRequest):
     env = get_or_create_env(body.agent_id)
     obs = env.state()
 
-    # Check episode completion — use health_score or global_health based on agent
-    health = getattr(obs, 'global_health', None) or getattr(obs, 'health_score', 0)
+    # Check episode completion
+    health = getattr(obs, "global_health", None) or getattr(obs, "health_score", 0)
     if health >= 1.0 or env.step_count >= env.max_steps:
         raise HTTPException(status_code=400, detail="Episode complete. Call /reset to start a new one.")
 
-    # Get prompts — multi-agent envs provide their own prompts
-    if hasattr(env, 'get_llm_prompts'):
-        system_prompt, user_prompt = env.get_llm_prompts()
-    else:
-        system_prompt = (
-            "You are an automated DevOps system. You cannot speak. "
-            "You can only output raw JSON commands. No explanations, no extra text."
-        )
-        user_prompt = f"""You are an SRE agent triaging a distributed cluster failure.
+    # The split_brain env always exposes get_llm_prompts() for multi-agent routing
+    system_prompt, user_prompt = env.get_llm_prompts()
 
-CURRENT CLUSTER STATE:
-{obs.model_dump_json(indent=2)}
-
-RULES:
-1. Kill ALL hanging jobs before clearing any storage.
-2. Never restart a node whose disk_usage is above 50%. Clear its storage first.
-3. For nightmare: kill ALL 3 hydra jobs before clearing ANY storage.
-
-Respond with EXACTLY ONE JSON object. No other text.
-Valid action_type values: "kill_job", "restart_node", "clear_temp_storage", "noop"
-
-EXAMPLE:
-{{"action_type": "kill_job", "target_id": "job_rogue_99"}}
-"""
-
-    # Auto-select model: use fine-tuned LoRA model for cascading_deadlock
-    # (Because the LoRA was aggressively trained to penalize run_diagnostic,
-    # using it on regional_wipeout causes it to output 'noop' instead).
+    # Auto-select model: prefer fine-tuned LoRA model for cascading_deadlock
     active_model = MODEL_NAME
-    if body.agent_id == "split_brain" and SPLIT_BRAIN_MODEL and getattr(env, "current_task", "") == "cascading_deadlock":
+    if SPLIT_BRAIN_MODEL and getattr(env, "current_task", "") == "cascading_deadlock":
         active_model = SPLIT_BRAIN_MODEL
         print(f"[INFO] Using fine-tuned model: {active_model}")
 
@@ -259,32 +220,22 @@ EXAMPLE:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"LLM call failed: {str(e)}")
 
-    # Parse action based on agent type
-    if body.agent_id == "split_brain":
-        action = env._parse_action(raw_text)
-    else:
-        action = _extract_action(raw_text)
-
+    action = env._parse_action(raw_text)
     result = env.step(action)
     new_obs = result.observation
     msg     = result.info.get("message", "")
 
-    response = {
-        "step":        env.step_count,
-        "agent_id":    body.agent_id,
-        "action":      action.model_dump(),
-        "reward":      result.reward,
-        "done":        result.done,
-        "message":     msg,
-        "observation": new_obs.model_dump(),
+    return {
+        "step":           env.step_count,
+        "agent_id":       body.agent_id,
+        "action":         action.model_dump(),
+        "reward":         result.reward,
+        "done":           result.done,
+        "message":        msg,
+        "observation":    new_obs.model_dump(),
+        "current_actor":  result.info.get("current_actor", "orchestrator"),
+        "delegation_log": result.info.get("delegation_log", []),
     }
-
-    # Add multi-agent metadata for split_brain
-    if body.agent_id == "split_brain":
-        response["current_actor"] = result.info.get("current_actor", "orchestrator")
-        response["delegation_log"] = result.info.get("delegation_log", [])
-
-    return response
 
 
 # ══════════════════════════════════════════════════════════════════════════════

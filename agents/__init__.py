@@ -10,7 +10,6 @@ EXTENSIBILITY:
 The frontend sidebar auto-discovers all agents from GET /agents.
 """
 
-from agents.cluster_triage import AGENT_META as ct_meta, ENV_CLASS as ct_env
 from agents.split_brain import AGENT_META as sb_meta, ENV_CLASS as sb_env
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -26,10 +25,6 @@ from agents.split_brain import AGENT_META as sb_meta, ENV_CLASS as sb_env
 # The HTML sidebar and all API endpoints will discover it automatically.
 # ══════════════════════════════════════════════════════════════════════════════
 AGENT_REGISTRY = {
-    "cluster_triage": {
-        **ct_meta,
-        "env_class": ct_env,
-    },
     "split_brain": {
         **sb_meta,
         "env_class": sb_env,

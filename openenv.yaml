@@ -1,14 +1,15 @@
 ---
-# OpenEnv Specification — Cluster Triage Environment
+# OpenEnv Specification — Split-Brain Collapse Environment
 # Validate with: openenv validate
 
-name: cluster-triage-env
+name: split-brain-env
 version: "1.0.0"
 description: >
-  Enterprise 4-node distributed data cluster triage environment.
-  An AI agent acting as an automated Site Reliability Engineer (SRE)
-  must observe cluster health metrics and issue precise terminal commands
-  to prevent cascading infrastructure failures.
+  Three-datacenter split-brain network partition crisis environment.
+  A multi-agent AI team acting as orchestrator, netops, and dba must
+  collaboratively diagnose and resolve network partitions, replication
+  storms, cascading deadlocks, and regional wipeouts across DC1, DC2,
+  and DC3 before the cluster enters an unrecoverable split-brain state.
 
 author: "Team SoonValley"
 license: "MIT"
@@ -19,38 +20,50 @@ tags:
   - devops
   - sre
   - distributed-systems
+  - split-brain
+  - multi-agent
+  - network-partition
   - real-world
 
 # ── Observation Space ────────────────────────────────────────────────────────
 observation_space:
   type: object
-  description: "Full cluster state snapshot delivered to the agent each step"
+  description: "Full three-datacenter state snapshot delivered to the agent each step"
   properties:
-    health_score:
+    global_health:
       type: number
       minimum: 0.0
       maximum: 1.0
-      description: "Continuous cluster stability metric"
-    nodes:
+      description: "Continuous cluster stability metric across all three DCs"
+    current_actor:
+      type: string
+      enum: [orchestrator, netops, dba]
+      description: "Which sub-agent is active this step"
+    dc1_dc2_connected:
+      type: boolean
+      description: "Whether DC1 and DC2 network link is restored"
+    dc2_dc3_connected:
+      type: boolean
+      description: "Whether DC2 and DC3 network link is restored"
+    network_status:
+      type: string
+      enum: [partitioned, degraded, healthy]
+    replication_lag_ms:
+      type: number
+      description: "Database replication lag in milliseconds"
+    primary_db:
+      type: string
+      description: "Which DC currently holds the authoritative primary DB"
+    datacenters:
       type: array
-      description: "List of 4 NodeStatus objects (worker_01 to worker_04)"
+      description: "List of 3 DatacenterStatus objects (dc1, dc2, dc3)"
       items:
         type: object
         properties:
-          node_id:    { type: string }
-          status:     { type: string, enum: [healthy, high_memory, disk_full, offline] }
-          cpu_usage:  { type: number }
-          ram_usage:  { type: number }
-          disk_usage: { type: number }
-    active_jobs:
-      type: array
-      description: "Jobs currently running or hanging on the cluster"
-      items:
-        type: object
-        properties:
-          job_id:        { type: string }
-          status:        { type: string, enum: [running, hanging, queued, failed] }
-          ram_allocated: { type: number }
+          dc_id:       { type: string }
+          status:      { type: string, enum: [healthy, degraded, isolated, offline] }
+          node_count:  { type: integer }
+          load_pct:    { type: number }
     recent_alerts:
       type: array
       items: { type: string }
@@ -59,102 +72,121 @@ observation_space:
 # ── Action Space ─────────────────────────────────────────────────────────────
 action_space:
   type: object
-  description: "A single terminal command to execute on the cluster"
+  description: "A single command issued by the active sub-agent"
   properties:
     action_type:
       type: string
-      enum: [kill_job, restart_node, clear_temp_storage, noop]
-      description: "The command to execute"
+      enum:
+        - run_diagnostic
+        - update_route
+        - verify_routing
+        - throttle_bandwidth
+        - restore_replica
+        - promote_primary
+        - force_sync
+        - resolve_deadlock
+        - failover_region
+        - delegate
+        - noop
+      description: "The repair command to execute"
     target_id:
       type: string
-      description: "The job_id (e.g. job_rogue_99) or node_id (e.g. worker_01) to target"
+      description: "Target resource ID (e.g. dc2_router--dc3_router, replica_dc2)"
+    target_agent:
+      type: string
+      enum: [netops, dba]
+      description: "Sub-agent to delegate to (only for delegate action)"
+    instruction_payload:
+      type: object
+      description: "Nested action passed to the delegated sub-agent"
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 tasks:
-  - id: easy
+  - id: partition_basic
     description: >
-      THE STUCK JOB: A rogue MapReduce job (job_rogue_99) is stuck in an infinite
-      loop consuming all available RAM on worker_01. The agent must identify and
-      terminate it in a single action.
-    difficulty: easy
+      THE PARTITION: A single network link between DC1 and DC2 has failed,
+      causing a split-brain warning. The agent must diagnose and restore the
+      link before replication lag becomes critical.
+    difficulty: basic
     difficulty_score: 1
-    max_steps: 5
-    win_condition: "kill_job on job_rogue_99"
-    expected_score: 1.0
-
-  - id: medium
-    description: >
-      THE FULL DISK: Worker node worker_03 has hit 99.9% disk capacity causing all
-      HDFS writes to fail. The agent must clear temporary storage first, then restart
-      the node in the correct order.
-    difficulty: medium
-    difficulty_score: 2
-    max_steps: 10
-    win_condition: "clear_temp_storage on worker_03, then restart_node on worker_03"
-    expected_score: 1.0
-
-  - id: hard
-    description: >
-      CASCADE FAILURE: A rogue job triggered a replication storm that crashed nodes
-      worker_01 and worker_02. The agent must kill the root cause job, clear storage
-      on both offline nodes (order matters — rogue job must be killed first or disks
-      refill), then reboot both nodes safely.
-    difficulty: hard
-    difficulty_score: 3
     max_steps: 15
-    win_condition: "kill job_rogue_99, clear worker_01, clear worker_02, restart worker_01, restart worker_02"
+    win_condition: "restore DC1–DC2 connectivity and verify routing"
     expected_score: 1.0
 
-  - id: very_hard
+  - id: replication_storm
     description: >
-      MULTI-VECTOR ATTACK: Two simultaneous malware jobs — a disk-filling log spammer
-      (job_log_spam) targeting nodes 1&2, and a RAM-hogging crypto miner (job_crypto_miner)
-      targeting nodes 3&4. The agent must terminate both malware instances before
-      storage recovery or face re-infection penalties.
-    difficulty: very_hard
-    difficulty_score: 4
-    max_steps: 20
-    win_condition: "kill both malware jobs, clear nodes 1&2, restart nodes 1&2"
-    expected_score: 1.0
-
-  - id: nightmare
-    description: >
-      THE HYDRA PROTOCOL: Total cluster collapse. All 4 nodes are offline, all disks
-      at 100%. Three self-replicating malware jobs are writing garbage data simultaneously.
-      The Hydra mechanic: if ANY job survives when storage is cleared, it instantly
-      cross-infects and refills the disk to 100%. The agent must kill ALL THREE Hydra
-      jobs before attempting any storage operations, then clear and reboot all 4 nodes.
-    difficulty: nightmare
-    difficulty_score: 5
+      REPLICATION STORM: A thundering-herd replication burst has saturated
+      all inter-DC links. The agent must throttle bandwidth, restore replicas
+      in the correct order, and force a sync before lag exceeds the SLA.
+    difficulty: storm
+    difficulty_score: 2
     max_steps: 25
-    win_condition: "kill hydra_1, hydra_2, hydra_3, clear all 4 nodes, restart all 4 nodes"
+    win_condition: "throttle links, restore all replicas, force_sync"
+    expected_score: 1.0
+
+  - id: split_brain
+    description: >
+      THE SPLIT-BRAIN: Both DC1–DC2 and DC2–DC3 links are down simultaneously.
+      Two competing primaries have diverged. The agent must isolate one primary,
+      elect a canonical winner, and reconcile divergent write logs before data
+      loss becomes permanent.
+    difficulty: split
+    difficulty_score: 3
+    max_steps: 35
+    win_condition: "restore both links, promote single primary, reconcile replicas"
+    expected_score: 1.0
+
+  - id: cascading_deadlock
+    description: >
+      CASCADING DEADLOCK: A distributed transaction deadlock has propagated
+      across DC1 and DC2, freezing all write paths. Netops must re-route
+      traffic while DBA resolves the deadlock cycle. Incorrect ordering
+      (resolving before re-routing) re-triggers the deadlock.
+    difficulty: deadlock
+    difficulty_score: 4
+    max_steps: 35
+    win_condition: "update_route, verify_routing, resolve_deadlock, force_sync"
+    expected_score: 1.0
+
+  - id: regional_wipeout
+    description: >
+      REGIONAL WIPEOUT: DC3 has gone completely offline due to a catastrophic
+      hardware failure. DC1 and DC2 are in split-brain with diverged primaries.
+      The agent must execute a full regional failover: re-route all traffic,
+      promote a new primary, restore all replicas, and bring DC3 back online
+      — all within the step budget.
+    difficulty: wipeout
+    difficulty_score: 5
+    max_steps: 50
+    win_condition: "failover_region, promote_primary, restore all replicas, verify_routing"
     expected_score: 1.0
 
 # ── Reward Design ─────────────────────────────────────────────────────────────
 reward_design:
   type: shaped
   description: >
-    Continuous shaped rewards provide signal across the full trajectory.
-    Each correct intermediate step yields partial credit (+0.1 to +0.5).
-    Incorrect ordering (e.g., restarting before clearing) yields penalties (-0.1 to -0.3).
-    Surviving Hydra jobs trigger heavy penalties (-0.15) to prevent exploitation.
-    Episode terminates on task completion (max reward 1.0) or max_steps timeout.
+    Continuous shaped rewards provide signal across the full multi-agent trajectory.
+    Each correct delegation and sub-agent action yields partial credit (+0.1 to +0.5).
+    Incorrect ordering (e.g., promoting primary before routing is stable) yields
+    penalties (-0.1 to -0.3). Repeated run_diagnostic calls trigger diminishing
+    returns to prevent diagnostic loops. Episode terminates on task completion
+    (global_health >= 1.0) or max_steps timeout.
 
 # ── Baseline ─────────────────────────────────────────────────────────────────
 baseline:
   model: "deepseek-ai/DeepSeek-R1-Distill-Llama-70B"
   script: "inference.py"
   scores:
-    easy:      1.0
-    medium:    1.0
-    hard:      1.0
-    very_hard: 1.0
-    nightmare: 1.0
+    partition_basic:   1.0
+    replication_storm: 1.0
+    split_brain:       1.0
+    cascading_deadlock: 1.0
+    regional_wipeout:  1.0
 
 # ── Deployment ────────────────────────────────────────────────────────────────
 deployment:
   platform: huggingface_spaces
-  space_id: "soonvalley04/scaler-openenv-cluster-triage"
+  space_id: "soonvalley04/openenv-split-brain-collapse"
   sdk: docker
   port: 7860
   health_endpoint: "/health"
