@@ -28,8 +28,11 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -x
+          # Delete github's .git history to avoid pushing past large files (like the deleted safetensors)
+          rm -rf .git
+          git init
           git config user.email "actions@github.com"
           git config user.name  "GitHub Actions"
-          git add Dockerfile
-          git commit -m "ci: use Dockerfile.train for HF training Space" || echo "nothing to commit"
-          git push --force https://soonvalley04:$HF_TOKEN@huggingface.co/spaces/soonvalley04/split-brain-training HEAD:main
+          git add .
+          git commit -m "ci: deploy clean snapshot to HF Space"
+          git push --force https://soonvalley04:$HF_TOKEN@huggingface.co/spaces/soonvalley04/split-brain-training main
