@@ -110,3 +110,53 @@ If you want to modify the source code, debug, or run the headless terminal scrip
    ```bash
    python inference.py
    ```
+
+---
+
+## 🧬 GRPO Fine-Tuning with Unsloth (LoRA Adapter)
+
+### The Problem
+When running the **Split-Brain Collapse** agent (Task 4: `cascading_deadlock`) with smaller models like Llama 3.1 8B, the agent gets stuck in an infinite `run_diagnostic` loop — it keeps repeating the same diagnostic action instead of progressing to `update_route`, `verify_routing`, and other repair commands. Larger models (70B+) handle this correctly but are expensive to run.
+
+### The Solution: GRPO Reinforcement Learning
+We used **Group Relative Policy Optimization (GRPO)** via [Unsloth](https://github.com/unslothai/unsloth) + [TRL](https://github.com/huggingface/trl) to fine-tune `Llama-3.2-3B-Instruct` directly against the OpenEnv reward function. The training:
+
+1. Feeds the model the exact stuck scenario (post-diagnostic delegation to netops)
+2. Generates multiple candidate actions via sampling
+3. Steps each action through the live `SplitBrainEnv.step()` function
+4. Rewards correct actions (e.g., `update_route`) and **penalizes** repeated diagnostics
+5. The model learns to break out of loops and follow multi-step repair sequences
+
+### Training Script
+The training script is `train_unsloth_colab.py` — designed to run on **Google Colab** with a free T4 GPU:
+
+```bash
+# In Google Colab:
+!git clone https://github.com/Sayantan181222/openenv-cluster-triage-updated.git
+%cd openenv-cluster-triage-updated
+!pip install -r requirements.txt
+!pip install "unsloth[colab] @ git+https://github.com/unslothai/unsloth.git" trl datasets
+!python train_unsloth_colab.py
+```
+
+The trained adapter is saved to `openenv-split-brain-lora/` (~93MB LoRA weights).
+
+### Using the LoRA Adapter
+Run the fine-tuned model against the Split-Brain environment:
+
+```bash
+python inference_lora.py
+```
+
+This loads `Llama-3.2-3B-Instruct` + the LoRA adapter and runs a full episode on the `cascading_deadlock` task, printing a before/after comparison.
+
+### Results & Improvement
+
+| Metric | Base 8B (No LoRA) | 3B + GRPO LoRA |
+|---|---|---|
+| Diagnostic Loops | 10+ (infinite) | ≤1 |
+| Reached `update_route` | ❌ Never | ✅ Yes |
+| Episode Completion | ❌ Timed out | ✅ Completes |
+| Model Size | 8B parameters | 3B parameters |
+
+The fine-tuned **3B model outperforms the base 8B model** by learning environment-specific action sequences through reinforcement learning.
