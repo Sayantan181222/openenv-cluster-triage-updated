@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir --upgrade torch torchvision torchaudio && \
     pip install --no-cache-dir \
         "unsloth @ git+https://github.com/unslothai/unsloth.git" \
+        unsloth_zoo \
         trl \
         datasets \
         matplotlib \
