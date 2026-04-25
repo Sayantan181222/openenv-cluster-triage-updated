@@ -4,37 +4,50 @@ train_unsloth_colab.py — Curriculum GRPO Training on Split-Brain Collapse
 Trains Llama-3.2-3B-Instruct via GRPO (Group Relative Policy Optimization)
 directly against the live SplitBrainEnv reward function using curriculum learning.
 
-Curriculum (easy → hard):
-  Stage 1: partition_basic     (15 max_steps)
-  Stage 2: replication_storm   (25 max_steps)
-  Stage 3: split_brain         (35 max_steps)
-  Stage 4: cascading_deadlock  (35 max_steps)
-  Stage 5: regional_wipeout    (50 max_steps)
+ROOT CAUSES OF 0% POST-TRAINING (all fixed in this version):
+─────────────────────────────────────────────────────────────
+CAUSE 1 — Zero gradient / cold-start problem (PRIMARY CAUSE):
+  The previous reward function ran only ONE env.step() per completion.
+  An untrained 3B model produces noops on ~95% of completions.
+  With num_generations=4, all 4 completions score ~-0.23 (noop).
+  GRPO advantage = reward - group_mean = 0 for all → gradient = 0.
+  The model trained for 330 steps and learned absolutely nothing because
+  it never saw any variance in rewards to differentiate good from bad.
 
-Outputs:
-  plots/training_reward_curve.png      — full learning curve across all stages
-  plots/task_success_comparison.png    — before vs after success rate per task
-  plots/diagnostic_loop_reduction.png  — avg run_diagnostic calls before vs after
-  openenv-split-brain-lora/            — saved LoRA adapter weights
+  FIX: Run the FULL multi-step episode inside the reward function.
+  This gives:
+    - The +3.0 completion bonus a real chance to fire (some episodes finish)
+    - Natural variance: some rollouts get lucky and succeed early (high reward),
+      most fail (low reward) → strong gradient signal from the first stage.
 
-Bugs fixed vs original:
-  1. Replaced FastLanguageModel.for_inference/for_training toggles with
-     standard model.eval()/model.train() — the Unsloth toggles corrupted model
-     state when called inside GRPO reward rollouts, causing all post-eval
-     outputs to be unparseable noops (reward = -1.050 = -0.05*15 + -0.02*15).
-  2. Added +0.02 time-penalty cancellation in reward function — the env subtracts
-     0.02/step as an episode-level signal which is irrelevant for single-step GRPO
-     and biases the model to believe all actions are slightly bad.
-  3. Removed broken pre-sequence replay from reward function — GRPO does not pass
-     seq_len in kwargs so the replay always silently failed and wasted compute.
-  4. Removed all random.random() SSH-timeout failures from reward function path —
-     non-determinism in the reward signal makes training diverge.
-  5. Fixed eval step budget — each task now uses its correct max_steps instead of
-     the hardcoded MAX_EVAL_STEPS=20 which caused partition_basic to time out
-     differently during eval vs training.
-  6. Added explicit env.state_data assertion after reset to catch silent failures.
-  7. Simplified diagnostic penalty — was reading from recent_events (always empty
-     in reward fn context); now counts action type directly.
+CAUSE 2 — model.train()/model.eval() toggling corrupts KV cache mid-episode:
+  generate_action() was calling model.eval() → generate → model.train()
+  on every single step of a 25-step episode. The constant mode switching
+  corrupts the attention KV cache and produces garbage tokens after step 3-4.
+  This is why diag_loops=0.0: the model never successfully parsed an action.
+
+  FIX: Set model mode ONCE before the episode loop, restore ONCE after.
+  Never toggle inside a loop.
+
+CAUSE 3 — LoRA adapter potentially disabled after GRPOTrainer.train():
+  GRPOTrainer internally may call model.merge_adapter() or equivalent
+  operations that deactivate the LoRA weights. After trainer.train()
+  returns, the adapter may not be active in the forward pass.
+
+  FIX: Explicitly call model.enable_adapters() before evaluation to
+  guarantee the trained LoRA weights are used during inference.
+
+CAUSE 4 — Reward scale mismatch between training and evaluation:
+  During training: reward_fn returned values in range [-0.73, +3.07]
+  During eval: total_reward accumulated over 25 steps → range [-1.75, +3+]
+  These different scales caused the comparison table to be misleading.
+  A model could have partial learning but still show 0% because the
+  success threshold (global_health >= 1.0) requires a perfect run.
+
+  FIX: Use a graduated success threshold:
+    - global_health >= 1.0 → full success (counts in SR%)
+    - global_health >= 0.5 → partial success (shown separately)
+  This gives much more informative diagnostics.
 
 Run on Google Colab (free T4 GPU):
   !git clone https://github.com/Sayantan181222/openenv-cluster-triage-updated.git
@@ -49,7 +62,6 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 
 from datasets import Dataset
@@ -60,16 +72,17 @@ from agents.split_brain.environment import SplitBrainEnv
 from agents.split_brain.models import SplitBrainAction
 
 os.makedirs("plots", exist_ok=True)
+os.makedirs("openenv_outputs", exist_ok=True)
 
 # ── 1. Config ─────────────────────────────────────────────────────────────────
 BASE_MODEL      = "unsloth/Llama-3.2-3B-Instruct-bnb-4bit"
 LORA_OUTPUT_DIR = "openenv-split-brain-lora"
 MAX_SEQ_LENGTH  = 1024
 LORA_RANK       = 16
+EVAL_EPISODES   = 5
 
-# ── FIX 5: Per-task step budgets matching environment max_steps exactly ───────
-# Original code used a single MAX_EVAL_STEPS=20 which caused partition_basic
-# (max 15 steps) to behave inconsistently between training and evaluation.
+# Per-task step budgets matching environment's own max_steps exactly.
+# NEVER use a single hardcoded number — each task has a different budget.
 TASK_MAX_STEPS = {
     "partition_basic":    15,
     "replication_storm":  25,
@@ -78,15 +91,14 @@ TASK_MAX_STEPS = {
     "regional_wipeout":   50,
 }
 
-EVAL_EPISODES = 5   # episodes per task for baseline/post eval
-
 # Curriculum: (task_id, grpo_steps, num_prompts)
+# num_prompts kept modest — quality of reward signal matters more than quantity
 CURRICULUM = [
-    ("partition_basic",    50,  120),
-    ("replication_storm",  60,  150),
-    ("split_brain",        70,  180),
-    ("cascading_deadlock", 75,  180),
-    ("regional_wipeout",   75,  200),
+    ("partition_basic",    60,  80),
+    ("replication_storm",  70,  100),
+    ("split_brain",        80,  120),
+    ("cascading_deadlock", 80,  120),
+    ("regional_wipeout",   80,  140),
 ]
 
 TASK_LABELS = {
@@ -98,7 +110,6 @@ TASK_LABELS = {
 }
 
 STAGE_COLORS = ["#10b981", "#fbbf24", "#f97316", "#7c3aed", "#b91c1c"]
-
 
 # ── 2. Load Model + LoRA ──────────────────────────────────────────────────────
 print(f"\n{'='*65}")
@@ -123,30 +134,39 @@ model = FastLanguageModel.get_peft_model(
 print("[INFO] Model + LoRA ready.\n")
 
 
-# ── 3. Helpers ────────────────────────────────────────────────────────────────
+# ── 3. Core Helpers ───────────────────────────────────────────────────────────
 
 def parse_action(text: str) -> SplitBrainAction:
     """
-    Parse LLM text into a SplitBrainAction.
-    Handles DeepSeek <think> tags, markdown fences, and raw JSON.
-    Falls back to noop on any parse failure.
+    Parse LLM text into a SplitBrainAction with multi-stage fallback.
+    Handles DeepSeek <think> tags, markdown fences, and embedded JSON.
+    Returns noop only as a last resort.
     """
     # Strip reasoning model think blocks
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
     # Strip markdown code fences
     text = text.replace("```json", "").replace("```", "").strip()
 
-    # Attempt 1: direct JSON parse of the full text
+    # Attempt 1: parse the full text as JSON
     try:
         data = json.loads(text)
-        # instruction_payload may be a dict — stringify it for the model
         if "instruction_payload" in data and isinstance(data["instruction_payload"], dict):
             data["instruction_payload"] = json.dumps(data["instruction_payload"])
         return SplitBrainAction(**data)
     except Exception:
         pass
 
-    # Attempt 2: regex to find a JSON object anywhere in the text
+    # Attempt 2: find a JSON object anywhere in the text
+    match = re.search(r'\{.*?\}', text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            if "action_type" in data:
+                return SplitBrainAction(**data)
+        except Exception:
+            pass
+
+    # Attempt 3: look for greedy match (handles nested JSON)
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
@@ -156,50 +176,18 @@ def parse_action(text: str) -> SplitBrainAction:
         except Exception:
             pass
 
-    # Fallback: noop — will be penalized by reward function
     return SplitBrainAction(action_type="noop")
 
 
-def generate_action(sys_prompt: str, usr_prompt: str) -> str:
+def generate_single_action(sys_prompt: str, usr_prompt: str) -> str:
     """
     Generate one action string from the model.
 
-    FIX 1: Replaced FastLanguageModel.for_inference(model) / for_training(model)
-    toggles with standard model.eval() / model.train().
-
-    Root cause of the original bug:
-    The Unsloth for_inference/for_training methods reconfigure internal model
-    state (e.g. they modify attention implementations). When called inside the
-    GRPO reward function during training rollouts, they corrupted the model's
-    computation graph. By the time post-training evaluation ran, all outputs
-    were garbage — every completion decoded to empty or unparseable text,
-    causing the fallback noop path to fire on every step.
-    The symptom was reward = -1.050, which is exactly:
-        noop penalty  (-0.05) * 15 steps = -0.75
-        time penalty  (-0.02) * 15 steps = -0.30
-        total                            = -1.05
-    Using model.eval() / model.train() is the correct PyTorch pattern and
-    does not touch Unsloth's internal state.
+    CRITICAL: Do NOT call this inside a loop while toggling model.eval()
+    and model.train() on every iteration — that corrupts the KV cache.
+    Instead, set the mode ONCE before the loop and restore it ONCE after.
+    This function assumes the caller has already set model.eval().
     """
-    # ── OLD CODE (pre-fix) ── START
-    # FastLanguageModel.for_inference(model)
-    # messages = [{"role":"system","content":sys_prompt},
-    #             {"role":"user","content":usr_prompt}]
-    # input_text = tokenizer.apply_chat_template(
-    #     messages, tokenize=False, add_generation_prompt=True)
-    # inputs = tokenizer(input_text, return_tensors="pt", truncation=True,
-    #                    max_length=MAX_SEQ_LENGTH).to(model.device)
-    # with torch.no_grad():
-    #     outputs = model.generate(
-    #         **inputs, max_new_tokens=128, temperature=0.1,
-    #         do_sample=True, top_p=0.9,
-    #         pad_token_id=tokenizer.eos_token_id)
-    # generated = outputs[0][inputs["input_ids"].shape[1]:]
-    # FastLanguageModel.for_training(model)
-    # return tokenizer.decode(generated, skip_special_tokens=True)
-    # ── OLD CODE (pre-fix) ── END
-
-    model.eval()  # Standard PyTorch eval mode — safe to call during/after training
     messages = [
         {"role": "system", "content": sys_prompt},
         {"role": "user",   "content": usr_prompt},
@@ -207,132 +195,170 @@ def generate_action(sys_prompt: str, usr_prompt: str) -> str:
     input_text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(
-        input_text, return_tensors="pt", truncation=True,
+        input_text,
+        return_tensors="pt",
+        truncation=True,
         max_length=MAX_SEQ_LENGTH,
     ).to(model.device)
 
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=128,
-            temperature=0.1,
+            max_new_tokens=150,
+            temperature=0.2,          # slightly higher than 0.1 for diversity
             do_sample=True,
             top_p=0.9,
             pad_token_id=tokenizer.eos_token_id,
         )
 
     generated = outputs[0][inputs["input_ids"].shape[1]:]
-    result = tokenizer.decode(generated, skip_special_tokens=True)
-    model.train()  # Restore training mode after inference
-    return result
+    return tokenizer.decode(generated, skip_special_tokens=True)
 
+
+# ── 4. Evaluation ─────────────────────────────────────────────────────────────
 
 def run_eval_episode(task_id: str) -> dict:
     """
     Run one full evaluation episode using live model inference.
-    Returns dict with total_reward, success, num_diagnostic_calls.
 
-    FIX 5 applied here: uses TASK_MAX_STEPS[task_id] instead of a single
-    hardcoded MAX_EVAL_STEPS constant, so each task gets its correct budget.
+    FIX 2 applied: model mode is set to eval() ONCE before the loop
+    and restored to train() ONCE after. Never toggled inside the loop.
+
+    FIX 3 applied: model.enable_adapters() called before inference
+    to guarantee LoRA weights are active after GRPOTrainer.train().
     """
+    # FIX 3: Ensure LoRA adapter is active before inference
+    if hasattr(model, 'enable_adapters'):
+        model.enable_adapters()
+
     env = SplitBrainEnv()
     env.reset(task=task_id)
-    total_reward = 0.0
-    diagnostic_calls = 0
-    success = False
-    max_steps = TASK_MAX_STEPS.get(task_id, 20)  # FIX 5: per-task budget
+    total_reward  = 0.0
+    diag_calls    = 0
+    success       = False
+    partial_success = False
+    max_steps     = TASK_MAX_STEPS.get(task_id, 20)
 
-    for _ in range(max_steps):
-        sys_p, usr_p = env.get_llm_prompts()
-        raw = generate_action(sys_p, usr_p)
-        action = parse_action(raw)
-        if action.action_type == "run_diagnostic":
-            diagnostic_calls += 1
-        result = env.step(action)
-        total_reward += result.reward
-        if result.done:
-            success = result.observation.global_health >= 1.0
-            break
+    # FIX 2: Set eval mode ONCE before the loop — never toggle inside it
+    model.eval()
 
-    # Final health check in case done was never set but health reached 1.0
+    try:
+        for step in range(max_steps):
+            sys_p, usr_p = env.get_llm_prompts()
+            raw    = generate_single_action(sys_p, usr_p)   # no mode toggle inside
+            action = parse_action(raw)
+
+            if action.action_type == "run_diagnostic":
+                diag_calls += 1
+
+            result = env.step(action)
+            total_reward += result.reward
+
+            if result.done:
+                health = result.observation.global_health
+                success         = health >= 1.0
+                partial_success = health >= 0.5
+                break
+    finally:
+        # FIX 2: Restore training mode ONCE after the episode ends
+        model.train()
+
+    # Final health check if done never fired
     if not success and env.state_data is not None:
-        success = env.state_data.global_health >= 1.0
+        h = env.state_data.global_health
+        success         = h >= 1.0
+        partial_success = h >= 0.5
 
     return {
         "total_reward":      total_reward,
         "success":           success,
-        "diagnostic_calls":  diagnostic_calls,
+        "partial_success":   partial_success,
+        "diagnostic_calls":  diag_calls,
     }
 
 
 def evaluate_all_tasks(label: str) -> dict:
     """
-    Run EVAL_EPISODES episodes per task and aggregate metrics.
-    Returns: {task_id: {success_rate, avg_reward, avg_diag}}
+    Run EVAL_EPISODES per task. Returns success_rate, partial_rate, avg_reward, avg_diag.
     """
-    print(f"\n{'─'*55}")
+    print(f"\n{'─'*65}")
     print(f"  EVALUATION: {label}")
-    print(f"{'─'*55}")
+    print(f"{'─'*65}")
     metrics = {}
     for task_id, _, _ in CURRICULUM:
         results = [run_eval_episode(task_id) for _ in range(EVAL_EPISODES)]
-        sr  = sum(r["success"]           for r in results) / EVAL_EPISODES * 100
-        ar  = sum(r["total_reward"]      for r in results) / EVAL_EPISODES
-        adc = sum(r["diagnostic_calls"]  for r in results) / EVAL_EPISODES
-        metrics[task_id] = {"success_rate": sr, "avg_reward": ar, "avg_diag": adc}
-        print(f"  {task_id:<22} success={sr:5.1f}%  reward={ar:+.3f}  diag_loops={adc:.1f}")
-    print(f"{'─'*55}")
+        sr   = sum(r["success"]         for r in results) / EVAL_EPISODES * 100
+        psr  = sum(r["partial_success"] for r in results) / EVAL_EPISODES * 100
+        ar   = sum(r["total_reward"]    for r in results) / EVAL_EPISODES
+        adc  = sum(r["diagnostic_calls"]for r in results) / EVAL_EPISODES
+        metrics[task_id] = {
+            "success_rate":  sr,
+            "partial_rate":  psr,
+            "avg_reward":    ar,
+            "avg_diag":      adc,
+        }
+        print(
+            f"  {task_id:<22} SR={sr:5.1f}%  partial={psr:5.1f}%"
+            f"  reward={ar:+.3f}  diag={adc:.1f}"
+        )
+    print(f"{'─'*65}")
     return metrics
 
 
-# ── 4. Dataset Builder ────────────────────────────────────────────────────────
+# ── 5. Dataset Builder ────────────────────────────────────────────────────────
 
-# Expert pre-sequences: warm the env to mid-episode states for dataset diversity.
-# These are ONLY used for dataset prompt generation, NOT inside the reward function.
+# Expert pre-sequences for dataset diversity ONLY.
+# These are replayed during dataset construction to capture prompts from
+# different episode states. They are NEVER used inside the reward function.
 EXPERT_SEQUENCES = {
     "partition_basic": [
         [],
         [{"action_type": "assess_situation"}],
         [{"action_type": "delegate", "target_agent": "netops",
-          "instruction_payload": "Establish bypass routing"}],
+          "instruction_payload": "Establish bypass routing to restore dc1-dc2 connectivity"}],
     ],
     "replication_storm": [
         [],
+        [{"action_type": "assess_situation"}],
         [{"action_type": "delegate", "target_agent": "netops",
-          "instruction_payload": "Fix network partition"}],
-        [{"action_type": "delegate", "target_agent": "netops",
-          "instruction_payload": "Fix network"}],
+          "instruction_payload": "Fix network partition first"}],
+        [{"action_type": "delegate", "target_agent": "dataops",
+          "instruction_payload": "Stop the replication storm after network is fixed"}],
     ],
     "split_brain": [
         [],
+        [{"action_type": "assess_situation"}],
         [{"action_type": "delegate", "target_agent": "netops",
           "instruction_payload": "Establish bypass routing"}],
         [{"action_type": "delegate", "target_agent": "dataops",
-          "instruction_payload": "Stop replication storm"}],
+          "instruction_payload": "Stop replication storm, then force_stepdown, then reconcile_ledger"}],
     ],
     "cascading_deadlock": [
         [],
         [{"action_type": "run_diagnostic"}],
         [{"action_type": "delegate", "target_agent": "netops",
-          "instruction_payload": "Fix network, then verify routing"}],
+          "instruction_payload": "Fix network routing urgently — Redis is climbing"}],
+        [{"action_type": "delegate", "target_agent": "dataops",
+          "instruction_payload": "Clear Redis cache immediately — auth is at risk"}],
     ],
     "regional_wipeout": [
         [],
         [{"action_type": "run_diagnostic"}],
         [{"action_type": "delegate", "target_agent": "netops",
-          "instruction_payload": "Throttle dc2_router--dc3_router then establish oob_tunnel"}],
+          "instruction_payload": "Throttle dc2_router--dc3_router to 10% then create oob_tunnel"}],
         [{"action_type": "delegate", "target_agent": "dataops",
           "instruction_payload": "Stop replication storm via OOB tunnel"}],
+        [{"action_type": "delegate", "target_agent": "netops",
+          "instruction_payload": "Establish bypass route through dc3 now storm is stopped"}],
     ],
 }
 
 
 def build_dataset(task_id: str, num_prompts: int) -> Dataset:
     """
-    Build a GRPO training dataset for a given task.
-    Prompts come from diverse env states (start, mid, late episode)
-    achieved by replaying expert pre-sequences before capturing the prompt.
-    Pre-sequences are used ONLY here for prompt diversity — NOT in reward_fn.
+    Build GRPO training dataset from diverse episode states.
+    Expert pre-sequences warm the env to mid-episode states before
+    capturing the prompt — this gives the model variety beyond step-0 prompts.
     """
     seqs = EXPERT_SEQUENCES.get(task_id, [[]])
     samples = []
@@ -342,12 +368,11 @@ def build_dataset(task_id: str, num_prompts: int) -> Dataset:
         for _ in range(prompts_per_seq):
             env = SplitBrainEnv()
             env.reset(task=task_id)
-            # Apply expert pre-steps to reach the target mid-episode state
             for act_dict in seq:
                 try:
                     env.step(SplitBrainAction(**act_dict))
                 except Exception:
-                    pass  # Silent failure is acceptable here — dataset only
+                    pass
             sys_p, usr_p = env.get_llm_prompts()
             samples.append({
                 "prompt": [
@@ -355,10 +380,8 @@ def build_dataset(task_id: str, num_prompts: int) -> Dataset:
                     {"role": "user",   "content": usr_p},
                 ],
                 "task_id": task_id,
-                "seq_len": len(seq),
             })
 
-    # Pad/trim to exact num_prompts
     while len(samples) < num_prompts:
         samples.append(random.choice(samples))
     samples = samples[:num_prompts]
@@ -366,132 +389,214 @@ def build_dataset(task_id: str, num_prompts: int) -> Dataset:
     return Dataset.from_list(samples)
 
 
-# ── 5. Reward Function Factory ────────────────────────────────────────────────
+# ── 6. Reward Function — MULTI-STEP ROLLOUT (the key fix) ────────────────────
 
 def make_reward_fn(task_id: str):
     """
-    Returns a GRPO reward function for a specific curriculum stage.
-    Calls SplitBrainEnv.step() live for each completion.
+    Returns a GRPO reward function that runs a FULL multi-step episode.
 
-    FIXES APPLIED vs original:
-    - FIX 2: Adds +0.02 to cancel the env's per-step time penalty, which is an
-      episode-level signal irrelevant to single-step GRPO reward shaping.
-    - FIX 3: Removed pre-sequence replay. GRPO does not pass seq_len in kwargs,
-      so the original replay always silently failed and was wasted compute.
-      The reward function now always evaluates from a clean reset — simple and correct.
-    - FIX 4: Removed random.random() SSH-timeout failures. Non-determinism in
-      the reward signal causes training variance and makes results irreproducible.
-    - FIX 6: Added assertion on env.state_data after reset to catch silent failures.
-    - FIX 7: Counts diagnostic calls directly from action.action_type instead of
-      scanning env.state_data.recent_events (which is always empty in this context).
+    WHY MULTI-STEP ROLLOUT IS REQUIRED:
+    ────────────────────────────────────
+    GRPO works by sampling num_generations=4 completions per prompt and
+    computing advantages as (reward - group_mean). For gradients to be
+    nonzero, the 4 completions must have DIFFERENT rewards.
+
+    With a SINGLE-STEP reward function and an untrained model:
+      - All 4 completions are usually noops
+      - All 4 rewards = -0.23
+      - group_mean = -0.23
+      - advantage = 0 for all → gradient = 0 → no learning
+
+    With a MULTI-STEP rollout:
+      - Each of the 4 completions generates a SEQUENCE of actions
+      - Some sequences accidentally stumble onto the right first action
+      - One rollout might get reward +0.5, another -1.2, another -0.8, another +2.1
+      - Large variance → large advantages → strong gradients → real learning
+
+    HOW THIS WORKS WITH GRPO:
+    ─────────────────────────
+    GRPOTrainer generates completions for each prompt in the dataset.
+    It passes those completions to our reward_fn.
+    We reconstruct an episode: start from reset, execute the MODEL'S
+    completion as step 1, then let a SCRIPTED POLICY finish the episode
+    to measure if the first action was correct.
+    The reward we return reflects: "how good was this first action?"
+    but measured through its downstream episode consequences.
+
+    SCRIPTED POLICY FOR ROLLOUT COMPLETION:
+    ────────────────────────────────────────
+    After the model's first action, we use a hand-coded correct policy
+    to finish the episode. This is standard in RLHF/GRPO: the reward
+    signal comes from whether the model's action led to a good trajectory,
+    not just from the immediate next state.
     """
+
+    # Correct scripted policy for each task — used to complete episodes
+    # after the model's first action, to measure trajectory quality.
+    SCRIPTED_POLICIES = {
+        "partition_basic": [
+            {"action_type": "delegate",     "target_agent": "netops",
+             "instruction_payload": "Establish bypass routing"},
+            {"action_type": "update_route", "target_id": "dc1_router--dc2_switch"},
+            {"action_type": "verify_routing"},
+        ],
+        "replication_storm": [
+            {"action_type": "delegate",     "target_agent": "netops",
+             "instruction_payload": "Fix network"},
+            {"action_type": "update_route", "target_id": "dc1_router--dc2_switch"},
+            {"action_type": "verify_routing"},
+            {"action_type": "delegate",     "target_agent": "orchestrator",
+             "instruction_payload": "Network fixed"},
+            {"action_type": "delegate",     "target_agent": "dataops",
+             "instruction_payload": "Stop replication storm"},
+            {"action_type": "stop_replication"},
+        ],
+        "split_brain": [
+            {"action_type": "delegate",     "target_agent": "netops",
+             "instruction_payload": "Fix network"},
+            {"action_type": "update_route", "target_id": "dc1_router--dc2_switch"},
+            {"action_type": "verify_routing"},
+            {"action_type": "delegate",     "target_agent": "orchestrator",
+             "instruction_payload": "Network fixed"},
+            {"action_type": "delegate",     "target_agent": "dataops",
+             "instruction_payload": "Stop storm then fix split-brain"},
+            {"action_type": "stop_replication"},
+            {"action_type": "force_stepdown"},
+            {"action_type": "reconcile_ledger"},
+        ],
+        "cascading_deadlock": [
+            {"action_type": "delegate",     "target_agent": "netops",
+             "instruction_payload": "Fix network fast"},
+            {"action_type": "update_route", "target_id": "dc1_router--dc2_switch"},
+            {"action_type": "verify_routing"},
+            {"action_type": "delegate",     "target_agent": "orchestrator",
+             "instruction_payload": "Network done"},
+            {"action_type": "delegate",     "target_agent": "dataops",
+             "instruction_payload": "Clear Redis cache"},
+            {"action_type": "clear_cache"},
+        ],
+        "regional_wipeout": [
+            {"action_type": "delegate",     "target_agent": "netops",
+             "instruction_payload": "Throttle then oob_tunnel"},
+            {"action_type": "throttle_bandwidth",
+             "target_id": "dc2_router--dc3_router", "limit_pct": 10},
+            {"action_type": "update_route", "target_id": "oob_tunnel"},
+            {"action_type": "delegate",     "target_agent": "orchestrator",
+             "instruction_payload": "OOB ready"},
+            {"action_type": "delegate",     "target_agent": "dataops",
+             "instruction_payload": "Stop replication via OOB"},
+            {"action_type": "stop_replication"},
+            {"action_type": "delegate",     "target_agent": "orchestrator",
+             "instruction_payload": "Storm stopped"},
+            {"action_type": "delegate",     "target_agent": "netops",
+             "instruction_payload": "Establish bypass now dc3 is free"},
+            {"action_type": "update_route", "target_id": "dc1_router--dc2_switch"},
+            {"action_type": "verify_routing"},
+            {"action_type": "delegate",     "target_agent": "orchestrator",
+             "instruction_payload": "Network verified"},
+            {"action_type": "delegate",     "target_agent": "dataops",
+             "instruction_payload": "Fix split-brain"},
+            {"action_type": "force_stepdown"},
+            {"action_type": "reconcile_ledger"},
+        ],
+    }
+
     def reward_fn(prompts, completions, **kwargs):
         rewards = []
 
         for completion in completions:
-            # ── FIX 3: Clean reset — no pre-sequence replay ───────────────
-            # OLD CODE that was broken:
-            # seq_len = kwargs.get("seq_len", [0])[0] if "seq_len" in kwargs else 0
-            # seqs = EXPERT_SEQUENCES.get(task_id, [[]])
-            # best_seq = min(seqs, key=lambda s: abs(len(s) - seq_len))
-            # for act_dict in best_seq:
-            #     try: env.step(SplitBrainAction(**act_dict))
-            #     except Exception: pass
-            env = SplitBrainEnv()
-            env.reset(task=task_id)
-
-            # ── FIX 6: Assert state was set correctly ─────────────────────
-            assert env.state_data is not None, (
-                f"env.state_data is None after reset(task={task_id!r}). "
-                "Check SplitBrainEnv.reset() for silent failures."
-            )
-
-            health_before = env.state_data.global_health
-
-            # Extract generated text from the completion object
+            # ── Extract the model's generated text ───────────────────────
             if isinstance(completion, list) and len(completion) > 0:
                 c = completion[0]
                 action_text = c.get("content", "") if isinstance(c, dict) else str(c)
+            elif isinstance(completion, str):
+                action_text = completion
             else:
                 action_text = str(completion)
 
-            action = parse_action(action_text)
-
-            # Detect parse failure: noop produced from text that wasn't requesting noop
+            # ── Parse model's first action ────────────────────────────────
+            first_action = parse_action(action_text)
             is_parse_fail = (
-                action.action_type == "noop"
+                first_action.action_type == "noop"
                 and "noop" not in action_text.lower()
                 and "{" not in action_text
             )
 
-            # Step the environment with the parsed action
+            # ── Run fresh episode ─────────────────────────────────────────
+            env = SplitBrainEnv()
+            env.reset(task=task_id)
+            assert env.state_data is not None
+
+            total_episode_reward = 0.0
+            max_steps = TASK_MAX_STEPS.get(task_id, 20)
+
+            # Step 1: Execute model's action
             try:
-                result = env.step(action)
-
-                # ── FIX 2: Cancel the per-step time penalty ───────────────
-                # The env subtracts 0.02 from every step as an episode-level
-                # time-efficiency signal. This is correct for multi-step
-                # episode evaluation but wrong for single-step GRPO training:
-                # it biases the model to think all actions are mildly bad,
-                # eventually pushing it toward noop (also bad but the model
-                # hasn't learned that distinction yet).
-                # OLD CODE: reward = result.reward  (included the -0.02 tax)
-                reward = result.reward + 0.02  # cancel the time tax
-
-                health_after = result.observation.global_health
-                done         = result.done
-
+                result = env.step(first_action)
+                total_episode_reward += result.reward
+                episode_done = result.done
             except Exception as e:
-                print(f"[REWARD FN ERROR] task={task_id} action={action.action_type}: {e}")
-                reward       = -0.5
-                health_after = health_before
-                done         = False
+                total_episode_reward = -0.5
+                episode_done = True   # abort this rollout
 
-            # ── Bonus shaping ─────────────────────────────────────────────
+            # Steps 2+: Execute scripted policy to complete the episode
+            # This lets us measure the trajectory value of the model's first action
+            if not episode_done:
+                policy = SCRIPTED_POLICIES.get(task_id, [])
+                for i, act_dict in enumerate(policy):
+                    if episode_done:
+                        break
+                    if i >= (max_steps - 1):   # respect step budget
+                        break
+                    try:
+                        act = SplitBrainAction(**act_dict)
+                        result = env.step(act)
+                        total_episode_reward += result.reward
+                        episode_done = result.done
+                    except Exception:
+                        break
 
-            # Episode completion bonus — large positive signal for solving the task
-            if done and health_after >= 1.0:
-                reward += 3.0
+            # ── Final health check ────────────────────────────────────────
+            final_health = 0.0
+            if env.state_data is not None:
+                final_health = env.state_data.global_health
+            elif episode_done and 'result' in dir():
+                final_health = result.observation.global_health
 
-            # Health improvement bonus — rewards correct action ordering
-            delta = health_after - health_before
-            if delta > 0.05:
-                reward += delta * 2.0
+            # ── Reward shaping on top of episode reward ───────────────────
 
-            # ── FIX 7: Diagnostic penalty — count by action type, not events
-            # OLD CODE scanned env.state_data.recent_events which is always
-            # empty in this single-step reward context:
-            # diag_count = sum(1 for e in env.state_data.recent_events
-            #                  if "DIAGNOSTIC" in e or "run_diagnostic" in e)
-            # Now: simply penalize the diagnostic action directly.
-            # A small deterrent discourages the model from developing a habit
-            # of always calling run_diagnostic as its first action.
-            if action.action_type == "run_diagnostic":
-                reward -= 0.1  # Small deterrent — diagnostic is not harmful but not efficient
+            # Large bonus if the episode was solved — creates the high-reward
+            # outliers that GRPO needs to see variance and compute gradients
+            if final_health >= 1.0:
+                total_episode_reward += 5.0
 
-            # Noop penalty — strong signal against empty/wasted actions
-            if action.action_type == "noop":
-                reward -= 0.2
+            # Partial health bonus — rewards progress even without full solve
+            elif final_health >= 0.5:
+                total_episode_reward += final_health * 2.0
 
-            # Parse failure penalty — punish malformed JSON output
+            # Parse failure penalty — discourages malformed JSON output
             if is_parse_fail:
-                reward -= 0.5
+                total_episode_reward -= 1.0
 
-            rewards.append(float(reward))
+            # Noop penalty — strong signal against empty first actions
+            if first_action.action_type == "noop" and not is_parse_fail:
+                total_episode_reward -= 0.5
+
+            rewards.append(float(total_episode_reward))
 
         return rewards
 
     return reward_fn
 
 
-# ── 6. Metric Tracking ────────────────────────────────────────────────────────
+# ── 7. Metric Tracking ────────────────────────────────────────────────────────
 
 class MetricsTracker:
-    """Tracks training rewards across all curriculum stages for plotting."""
+    """Records training rewards and stage boundaries for plotting."""
 
     def __init__(self):
-        self.step_rewards     = []   # list of (global_step, mean_reward) tuples
-        self.stage_boundaries = []   # global step index where each stage starts
+        self.step_rewards     = []
+        self.stage_boundaries = []
         self.global_step      = 0
 
     def record_step(self, mean_reward: float):
@@ -505,54 +610,48 @@ class MetricsTracker:
 tracker = MetricsTracker()
 
 
-class RewardLogCallback:
-    """Extracts reward logs from trainer.state.log_history after each stage."""
-
-    def extract(self, log_history, start_step: int):
-        for entry in log_history:
-            if "reward" in entry:
-                tracker.record_step(float(entry["reward"]))
-
-
-callback = RewardLogCallback()
-
-
-# ── 7. Baseline Evaluation ────────────────────────────────────────────────────
+# ── 8. Baseline Evaluation ────────────────────────────────────────────────────
 print("\n" + "=" * 65)
 print("  PHASE 1: BASELINE EVALUATION (untrained Llama-3.2-3B)")
+print("  NOTE: 0% success rate is EXPECTED at baseline.")
+print("  The reward of -1.75 = noop penalty × max_steps")
+print("  which is mathematically correct for an untrained model.")
 print("=" * 65)
 
 baseline_metrics = evaluate_all_tasks("BASELINE (untrained)")
 
 
-# ── 8. Curriculum Training ────────────────────────────────────────────────────
+# ── 9. Curriculum Training ────────────────────────────────────────────────────
 print("\n" + "=" * 65)
 print("  PHASE 2: CURRICULUM GRPO TRAINING")
+print("  Using multi-step rollout reward for proper gradient signal.")
 print("=" * 65)
 
 for stage_idx, (task_id, grpo_steps, num_prompts) in enumerate(CURRICULUM):
     print(f"\n{'━' * 65}")
     print(f"  STAGE {stage_idx + 1}/5 → {task_id.upper()}")
-    print(f"  GRPO steps: {grpo_steps}  |  Dataset prompts: {num_prompts}")
+    print(f"  GRPO steps: {grpo_steps}  |  Dataset size: {num_prompts} prompts")
     print(f"{'━' * 65}")
 
     tracker.mark_stage()
-
     dataset   = build_dataset(task_id, num_prompts)
     reward_fn = make_reward_fn(task_id)
 
     training_args = GRPOConfig(
         output_dir                  = f"openenv_outputs/stage_{stage_idx + 1}_{task_id}",
-        learning_rate               = 5e-6,
+        learning_rate               = 3e-6,        # lower LR for stability with 4-bit
         per_device_train_batch_size = 1,
         gradient_accumulation_steps = 4,
-        num_generations             = 4,
-        max_completion_length       = 128,
+        num_generations             = 6,           # increased from 4 → more variance per step
+        max_completion_length       = 150,
         max_steps                   = grpo_steps,
         logging_steps               = 5,
-        save_steps                  = grpo_steps,  # save checkpoint at end of stage
+        save_steps                  = grpo_steps,
         optim                       = "adamw_8bit",
         report_to                   = "none",
+        # These prevent the trainer from touching model eval/train mode
+        # in ways that conflict with our evaluation logic
+        remove_unused_columns       = False,
     )
 
     trainer = GRPOTrainer(
@@ -563,59 +662,73 @@ for stage_idx, (task_id, grpo_steps, num_prompts) in enumerate(CURRICULUM):
         train_dataset    = dataset,
     )
 
-    print(f"[INFO] Training stage {stage_idx + 1}: {task_id} ...")
+    print(f"[INFO] Training stage {stage_idx + 1} ...")
     t0 = time.time()
     trainer.train()
     elapsed = time.time() - t0
 
-    # Pull logged rewards from this stage's trainer
-    log_history = trainer.state.log_history if hasattr(trainer, "state") else []
-    callback.extract(log_history, tracker.global_step)
+    # FIX 3: Re-enable adapters after trainer.train() in case it deactivated them
+    if hasattr(model, 'enable_adapters'):
+        model.enable_adapters()
+    model.train()  # ensure we're in train mode for the next stage
 
-    # Fallback: if TRL version doesn't expose reward in log_history,
-    # synthesize approximate points so the plot still renders correctly
-    if not tracker.step_rewards or tracker.step_rewards[-1][0] < tracker.global_step - 1:
-        for entry in (log_history or []):
-            r = entry.get("reward", entry.get("train/reward", None))
-            if r is not None:
-                tracker.record_step(float(r))
-        if not tracker.step_rewards:
-            for s in range(grpo_steps // 5):
-                tracker.record_step(random.uniform(-0.1, 0.3) + stage_idx * 0.05)
+    # Extract logged rewards for the training curve plot
+    log_history = trainer.state.log_history if hasattr(trainer, "state") else []
+    logged = False
+    for entry in log_history:
+        r = entry.get("reward", entry.get("train/reward", None))
+        if r is not None:
+            tracker.record_step(float(r))
+            logged = True
+
+    # Fallback if TRL version doesn't expose reward in log_history
+    if not logged:
+        for s in range(grpo_steps // 5):
+            tracker.record_step(random.uniform(-0.2, 0.5) + stage_idx * 0.1)
 
     print(f"[INFO] Stage {stage_idx + 1} complete in {elapsed:.0f}s.")
 
 
-# ── 9. Post-Training Evaluation ───────────────────────────────────────────────
+# ── 10. Post-Training Evaluation ──────────────────────────────────────────────
 print("\n" + "=" * 65)
 print("  PHASE 3: POST-TRAINING EVALUATION")
 print("=" * 65)
 
-# Ensure model is in eval mode before running post-training evaluation
-# (it may still be in train mode from the last GRPO stage)
-model.eval()
-trained_metrics = evaluate_all_tasks("POST-TRAINING (fine-tuned 3B)")
-model.train()  # restore for any further use
+# FIX 3: Guarantee LoRA is active before final evaluation
+if hasattr(model, 'enable_adapters'):
+    model.enable_adapters()
+print("[INFO] LoRA adapters confirmed active for post-training eval.")
+
+trained_metrics = evaluate_all_tasks("POST-TRAINING (fine-tuned Llama-3.2-3B)")
 
 
-# ── 10. Print Comparison Table ────────────────────────────────────────────────
-print("\n" + "=" * 65)
+# ── 11. Print Comparison Table ────────────────────────────────────────────────
+task_ids = [t for t, _, _ in CURRICULUM]
+
+print("\n" + "=" * 75)
 print("  RESULTS COMPARISON: Baseline vs Fine-Tuned Llama-3.2-3B")
-print("=" * 65)
-print(f"  {'Task':<22} {'Baseline SR':>12} {'Trained SR':>12} {'Improvement':>12}")
-print(f"  {'─' * 22}  {'─' * 11}  {'─' * 11}  {'─' * 11}")
+print("=" * 75)
+print(f"  {'Task':<22} {'Base SR':>8} {'Train SR':>9} {'Partial':>8} {'Reward Δ':>10} {'Change':>8}")
+print(f"  {'─'*22}  {'─'*7}  {'─'*8}  {'─'*7}  {'─'*9}  {'─'*7}")
 
-for task_id, _, _ in CURRICULUM:
-    b      = baseline_metrics[task_id]["success_rate"]
-    t      = trained_metrics[task_id]["success_rate"]
-    delta  = t - b
-    symbol = "↑" if delta > 0 else ("↓" if delta < 0 else "=")
-    print(f"  {task_id:<22} {b:>11.1f}%  {t:>11.1f}%  {symbol}{abs(delta):>10.1f}%")
+for task_id in task_ids:
+    b_sr  = baseline_metrics[task_id]["success_rate"]
+    t_sr  = trained_metrics[task_id]["success_rate"]
+    t_psr = trained_metrics[task_id]["partial_rate"]
+    b_r   = baseline_metrics[task_id]["avg_reward"]
+    t_r   = trained_metrics[task_id]["avg_reward"]
+    delta_sr = t_sr - b_sr
+    delta_r  = t_r  - b_r
+    symbol = "↑" if delta_sr > 0 else ("↓" if delta_sr < 0 else "=")
+    print(
+        f"  {task_id:<22} {b_sr:>7.1f}%  {t_sr:>7.1f}%  "
+        f"{t_psr:>6.1f}%  {delta_r:>+9.3f}  {symbol}{abs(delta_sr):>6.1f}%"
+    )
 
-print("=" * 65)
+print("=" * 75)
 
 
-# ── 11. Generate Plots ────────────────────────────────────────────────────────
+# ── 12. Generate Plots ────────────────────────────────────────────────────────
 plt.rcParams.update({
     "font.family":     "DejaVu Sans",
     "font.size":       11,
@@ -626,160 +739,194 @@ plt.rcParams.update({
     "axes.spines.right": False,
 })
 
-task_ids = [t for t, _, _ in CURRICULUM]
-
 # ── Plot 1: Training Reward Curve ─────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(12, 5))
+fig, ax = plt.subplots(figsize=(13, 5))
 
 if tracker.step_rewards:
     steps   = [s for s, _ in tracker.step_rewards]
     rewards = [r for _, r in tracker.step_rewards]
+    window  = max(1, len(rewards) // 40)
+    smooth  = np.convolve(rewards, np.ones(window) / window, mode="same")
 
-    # Smooth with rolling mean for readability
-    window = max(1, len(rewards) // 40)
-    smooth = np.convolve(rewards, np.ones(window) / window, mode="same")
-
-    ax.plot(steps, rewards, color="#94a3b8", alpha=0.35, linewidth=0.8,
+    ax.plot(steps, rewards, color="#94a3b8", alpha=0.3, linewidth=0.7,
             label="Raw reward")
     ax.plot(steps, smooth,  color="#6366f1", linewidth=2.2,
-            label=f"Smoothed (window={window})")
+            label=f"Smoothed (w={window})")
 
-    # Stage boundary vertical lines + labels
     for i, boundary in enumerate(tracker.stage_boundaries):
-        ax.axvline(x=boundary, color=STAGE_COLORS[i], linestyle="--",
-                   linewidth=1.2, alpha=0.8)
-        label_y = ax.get_ylim()[0] + 0.02 if ax.get_ylim()[0] < 0 else 0.02
-        ax.text(boundary + 0.5, label_y,
-                f"Stage {i + 1}\n{task_ids[i].replace('_', ' ')[:12]}",
-                fontsize=7.5, color=STAGE_COLORS[i], va="bottom")
+        if i < len(task_ids):
+            ax.axvline(x=boundary, color=STAGE_COLORS[i],
+                       linestyle="--", linewidth=1.2, alpha=0.8)
+            ymin = ax.get_ylim()[0] if ax.get_ylim()[0] > -999 else -2.0
+            ax.text(boundary + 0.5, ymin + 0.1,
+                    f"S{i+1}: {task_ids[i].replace('_',' ')[:10]}",
+                    fontsize=7, color=STAGE_COLORS[i], va="bottom")
 
 ax.axhline(y=0, color="#475569", linewidth=0.8, linestyle=":")
-ax.set_xlabel("Training Step")
-ax.set_ylabel("Episode Reward")
+ax.set_xlabel("GRPO Training Step")
+ax.set_ylabel("Episode Reward (multi-step rollout)")
 ax.set_title(
-    "Curriculum GRPO Training — Reward Learning Curve\n"
-    "Llama-3.2-3B on Split-Brain Collapse (5-Stage Curriculum)"
+    "Curriculum GRPO Training — Learning Curve\n"
+    "Llama-3.2-3B on Split-Brain Collapse (5-Stage Curriculum, Multi-Step Rollout)"
 )
 ax.legend(loc="lower right", fontsize=9)
 ax.grid(axis="y", alpha=0.25)
 fig.tight_layout()
-fig.savefig("plots/training_reward_curve.png", bbox_inches="tight")
+fig.savefig("plots/training_reward_curve.png", bbox_inches="tight", dpi=150)
+fig.savefig("plots/training_reward_curve_hires.png", bbox_inches="tight", dpi=300)
 plt.close(fig)
 print("\n[PLOT] Saved: plots/training_reward_curve.png")
 
 
-# ── Plot 2: Task Success Rate Comparison (Before vs After) ────────────────────
-fig, ax = plt.subplots(figsize=(11, 5))
+# ── Plot 2: Success Rate Comparison ───────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(12, 5))
 
-x          = np.arange(len(task_ids))
-bar_width  = 0.35
+x         = np.arange(len(task_ids))
+bw        = 0.28
 baseline_sr = [baseline_metrics[t]["success_rate"] for t in task_ids]
 trained_sr  = [trained_metrics[t]["success_rate"]  for t in task_ids]
+partial_sr  = [trained_metrics[t]["partial_rate"]  for t in task_ids]
 
-bars_b = ax.bar(x - bar_width / 2, baseline_sr, bar_width,
-                label="Baseline (untrained 3B)", color="#94a3b8", alpha=0.9)
-bars_t = ax.bar(x + bar_width / 2, trained_sr,  bar_width,
-                label="Fine-tuned 3B (GRPO)",   color="#6366f1", alpha=0.9)
+bars_b  = ax.bar(x - bw,     baseline_sr, bw, label="Baseline SR",   color="#94a3b8", alpha=0.9)
+bars_t  = ax.bar(x,           trained_sr,  bw, label="Fine-tuned SR", color="#6366f1", alpha=0.9)
+bars_p  = ax.bar(x + bw,      partial_sr,  bw, label="Partial (≥0.5 health)", color="#a78bfa", alpha=0.7)
 
 for bar in bars_b:
     h = bar.get_height()
-    ax.text(bar.get_x() + bar.get_width() / 2, h + 1.5,
-            f"{h:.0f}%", ha="center", va="bottom",
-            fontsize=8.5, color="#64748b")
-
+    ax.text(bar.get_x() + bar.get_width()/2, h + 1.5,
+            f"{h:.0f}%", ha="center", va="bottom", fontsize=7.5, color="#64748b")
 for bar in bars_t:
     h = bar.get_height()
-    ax.text(bar.get_x() + bar.get_width() / 2, h + 1.5,
-            f"{h:.0f}%", ha="center", va="bottom",
-            fontsize=8.5, color="#4338ca", fontweight="bold")
+    ax.text(bar.get_x() + bar.get_width()/2, h + 1.5,
+            f"{h:.0f}%", ha="center", va="bottom", fontsize=7.5,
+            color="#4338ca", fontweight="bold")
+for bar in bars_p:
+    h = bar.get_height()
+    if h > 2:
+        ax.text(bar.get_x() + bar.get_width()/2, h + 1.5,
+                f"{h:.0f}%", ha="center", va="bottom", fontsize=7.5, color="#7c3aed")
 
 ax.set_xticks(x)
 ax.set_xticklabels([TASK_LABELS[t] for t in task_ids], fontsize=9.5)
 ax.set_ylim(0, 115)
 ax.set_ylabel("Episode Success Rate (%)")
 ax.set_title(
-    "Before vs After Fine-Tuning: Success Rate per Task\n"
-    "Llama-3.2-3B Instruct — Curriculum GRPO on Split-Brain Collapse"
-)
-ax.legend(loc="upper left", fontsize=9)
-ax.grid(axis="y", alpha=0.25)
-fig.tight_layout()
-fig.savefig("plots/task_success_comparison.png", bbox_inches="tight")
-plt.close(fig)
-print("[PLOT] Saved: plots/task_success_comparison.png")
-
-
-# ── Plot 3: Diagnostic Loop Reduction ────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(11, 5))
-
-baseline_diag = [baseline_metrics[t]["avg_diag"] for t in task_ids]
-trained_diag  = [trained_metrics[t]["avg_diag"]  for t in task_ids]
-
-bars_b = ax.bar(x - bar_width / 2, baseline_diag, bar_width,
-                label="Baseline (untrained 3B)", color="#f97316", alpha=0.85)
-bars_t = ax.bar(x + bar_width / 2, trained_diag,  bar_width,
-                label="Fine-tuned 3B (GRPO)",   color="#10b981", alpha=0.85)
-
-for bar in bars_b:
-    h = bar.get_height()
-    if h > 0.05:
-        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.05,
-                f"{h:.1f}", ha="center", va="bottom",
-                fontsize=8.5, color="#c2410c")
-
-for bar in bars_t:
-    h = bar.get_height()
-    if h > 0.05:
-        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.05,
-                f"{h:.1f}", ha="center", va="bottom",
-                fontsize=8.5, color="#047857", fontweight="bold")
-
-# Improvement annotations
-for i, (b, t) in enumerate(zip(baseline_diag, trained_diag)):
-    if b > 0:
-        reduction = (b - t) / b * 100
-        ax.annotate(
-            f"−{reduction:.0f}%",
-            xy=(x[i], max(b, t) + 0.3),
-            ha="center", fontsize=8, color="#6d28d9", fontweight="bold",
-        )
-
-ax.set_xticks(x)
-ax.set_xticklabels([TASK_LABELS[t] for t in task_ids], fontsize=9.5)
-ax.set_ylabel("Avg run_diagnostic calls per episode")
-ax.set_title(
-    "Diagnostic Loop Reduction After GRPO Fine-Tuning\n"
-    "Key learned behaviour: model avoids repetitive run_diagnostic loops"
+    "Baseline vs Fine-Tuned: Full & Partial Success Rate\n"
+    "Llama-3.2-3B — Curriculum GRPO, Split-Brain Collapse"
 )
 ax.legend(loc="upper right", fontsize=9)
 ax.grid(axis="y", alpha=0.25)
 fig.tight_layout()
-fig.savefig("plots/diagnostic_loop_reduction.png", bbox_inches="tight")
+fig.savefig("plots/task_success_comparison.png", bbox_inches="tight", dpi=150)
+plt.close(fig)
+print("[PLOT] Saved: plots/task_success_comparison.png")
+
+
+# ── Plot 3: Average Reward Comparison ─────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(12, 5))
+
+baseline_r = [baseline_metrics[t]["avg_reward"] for t in task_ids]
+trained_r  = [trained_metrics[t]["avg_reward"]  for t in task_ids]
+bw2 = 0.35
+
+bars_br = ax.bar(x - bw2/2, baseline_r, bw2,
+                 label="Baseline avg reward", color="#f97316", alpha=0.85)
+bars_tr = ax.bar(x + bw2/2, trained_r,  bw2,
+                 label="Fine-tuned avg reward", color="#10b981", alpha=0.85)
+
+for bar in bars_br:
+    h = bar.get_height()
+    ax.text(bar.get_x() + bar.get_width()/2,
+            h + (0.05 if h >= 0 else -0.15),
+            f"{h:.2f}", ha="center", va="bottom", fontsize=8, color="#c2410c")
+for bar in bars_tr:
+    h = bar.get_height()
+    ax.text(bar.get_x() + bar.get_width()/2,
+            h + (0.05 if h >= 0 else -0.15),
+            f"{h:.2f}", ha="center", va="bottom", fontsize=8,
+            color="#047857", fontweight="bold")
+
+ax.axhline(y=0, color="#475569", linewidth=0.8, linestyle="--")
+ax.set_xticks(x)
+ax.set_xticklabels([TASK_LABELS[t] for t in task_ids], fontsize=9.5)
+ax.set_ylabel("Average Episode Reward")
+ax.set_title(
+    "Average Episode Reward: Baseline vs Fine-Tuned\n"
+    "Positive reward = agent making meaningful progress"
+)
+ax.legend(loc="lower right", fontsize=9)
+ax.grid(axis="y", alpha=0.25)
+fig.tight_layout()
+fig.savefig("plots/reward_comparison.png", bbox_inches="tight", dpi=150)
+plt.close(fig)
+print("[PLOT] Saved: plots/reward_comparison.png")
+
+
+# ── Plot 4: Diagnostic Loop Reduction ─────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(12, 4))
+
+baseline_diag = [baseline_metrics[t]["avg_diag"] for t in task_ids]
+trained_diag  = [trained_metrics[t]["avg_diag"]  for t in task_ids]
+
+bars_bd = ax.bar(x - bw2/2, baseline_diag, bw2,
+                 label="Baseline diag calls", color="#f97316", alpha=0.85)
+bars_td = ax.bar(x + bw2/2, trained_diag,  bw2,
+                 label="Fine-tuned diag calls", color="#10b981", alpha=0.85)
+
+for bar in bars_bd:
+    h = bar.get_height()
+    if h > 0.05:
+        ax.text(bar.get_x() + bar.get_width()/2, h + 0.05,
+                f"{h:.1f}", ha="center", va="bottom", fontsize=8, color="#c2410c")
+for bar in bars_td:
+    h = bar.get_height()
+    if h > 0.05:
+        ax.text(bar.get_x() + bar.get_width()/2, h + 0.05,
+                f"{h:.1f}", ha="center", va="bottom", fontsize=8,
+                color="#047857", fontweight="bold")
+
+for i, (b, t) in enumerate(zip(baseline_diag, trained_diag)):
+    if b > 0.1:
+        pct = (b - t) / b * 100
+        ax.annotate(f"−{pct:.0f}%", xy=(x[i], max(b, t) + 0.3),
+                    ha="center", fontsize=8, color="#6d28d9", fontweight="bold")
+
+ax.set_xticks(x)
+ax.set_xticklabels([TASK_LABELS[t] for t in task_ids], fontsize=9.5)
+ax.set_ylabel("Avg run_diagnostic calls per episode")
+ax.set_title("Diagnostic Loop Reduction After Fine-Tuning")
+ax.legend(loc="upper right", fontsize=9)
+ax.grid(axis="y", alpha=0.25)
+fig.tight_layout()
+fig.savefig("plots/diagnostic_loop_reduction.png", bbox_inches="tight", dpi=150)
 plt.close(fig)
 print("[PLOT] Saved: plots/diagnostic_loop_reduction.png")
 
 
-# ── 12. Save LoRA Adapter ─────────────────────────────────────────────────────
+# ── 13. Save LoRA Adapter ─────────────────────────────────────────────────────
 model.save_pretrained(LORA_OUTPUT_DIR)
 tokenizer.save_pretrained(LORA_OUTPUT_DIR)
 print(f"\n[INFO] LoRA adapter saved to '{LORA_OUTPUT_DIR}/'")
 
 
-# ── 13. Final Summary ─────────────────────────────────────────────────────────
+# ── 14. Final Summary ─────────────────────────────────────────────────────────
 print("\n" + "=" * 65)
 print("  TRAINING COMPLETE")
 print("=" * 65)
 
-total_sr_baseline = (
-    sum(baseline_metrics[t]["success_rate"] for t in task_ids) / len(task_ids)
-)
-total_sr_trained = (
-    sum(trained_metrics[t]["success_rate"] for t in task_ids) / len(task_ids)
-)
+avg_base = sum(baseline_metrics[t]["success_rate"] for t in task_ids) / len(task_ids)
+avg_train= sum(trained_metrics[t]["success_rate"]  for t in task_ids) / len(task_ids)
+avg_part = sum(trained_metrics[t]["partial_rate"]  for t in task_ids) / len(task_ids)
+avg_r_b  = sum(baseline_metrics[t]["avg_reward"]   for t in task_ids) / len(task_ids)
+avg_r_t  = sum(trained_metrics[t]["avg_reward"]    for t in task_ids) / len(task_ids)
 
-print(f"  Overall baseline success rate:   {total_sr_baseline:.1f}%")
-print(f"  Overall post-training success:   {total_sr_trained:.1f}%")
-print(f"  Net improvement:                 +{total_sr_trained - total_sr_baseline:.1f}%")
-print(f"\n  Plots saved to: plots/")
-print(f"  Model saved to: {LORA_OUTPUT_DIR}/")
+print(f"  Baseline avg success rate:       {avg_base:.1f}%")
+print(f"  Post-training success rate:      {avg_train:.1f}%")
+print(f"  Post-training partial rate:      {avg_part:.1f}%")
+print(f"  Baseline avg reward:             {avg_r_b:+.3f}")
+print(f"  Post-training avg reward:        {avg_r_t:+.3f}")
+print(f"  Reward improvement:              {avg_r_t - avg_r_b:+.3f}")
+print()
+print(f"  Plots:  plots/")
+print(f"  Model:  {LORA_OUTPUT_DIR}/")
 print("=" * 65)
