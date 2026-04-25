@@ -228,8 +228,14 @@ def run_eval_episode(task_id: str) -> dict:
     to guarantee LoRA weights are active after GRPOTrainer.train().
     """
     # FIX 3: Ensure LoRA adapter is active before inference
-    if hasattr(model, 'enable_adapters'):
-        model.enable_adapters()
+    try:
+        if hasattr(model, 'set_adapter'):
+            model.set_adapter("default")
+        elif hasattr(model, 'enable_adapters'):
+            model.enable_adapters()
+    except Exception:
+        # During baseline, it's okay if this fails as the base model is active
+        pass
 
     env = SplitBrainEnv()
     env.reset(task=task_id)
@@ -695,8 +701,13 @@ print("  PHASE 3: POST-TRAINING EVALUATION")
 print("=" * 65)
 
 # FIX 3: Guarantee LoRA is active before final evaluation
-if hasattr(model, 'enable_adapters'):
-    model.enable_adapters()
+# FIX 3: Force the trained "default" adapter to be active for the final results
+try:
+    model.set_adapter("default")
+    print("[INFO] LoRA 'default' adapter confirmed active for post-training eval.")
+except:
+    if hasattr(model, 'enable_adapters'):
+        model.enable_adapters()
 print("[INFO] LoRA adapters confirmed active for post-training eval.")
 
 trained_metrics = evaluate_all_tasks("POST-TRAINING (fine-tuned Llama-3.2-3B)")
