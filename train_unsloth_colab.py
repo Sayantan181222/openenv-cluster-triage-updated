@@ -88,7 +88,6 @@ training_args = GRPOConfig(
     
     # ── AGGRESSIVE MEMORY SAVING ──
     num_generations=4,              # Reduced from 8 (saves 50% generation VRAM)
-    max_prompt_length=512,          # Keep prompts short
     max_completion_length=256,      # Limit the JSON output length
     
     max_steps=50,
