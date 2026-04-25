@@ -14,7 +14,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="unsloth/Llama-3.2-3B-Instruct-bnb-4bit", 
     max_seq_length=1024, 
     load_in_4bit=True,
-    fast_inference=True,
+    fast_inference=False,  # vLLM crashes on Colab T4 (compute cap 7.5)
     max_lora_rank=16,
 )
 
