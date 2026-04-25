@@ -11,10 +11,10 @@ from agents.split_brain.models import SplitBrainAction
 # --- 1. Load the Model ---
 max_seq_length = 2048
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="unsloth/Meta-Llama-3.1-8B-Instruct",
-    max_seq_length=max_seq_length,
+    model_name="unsloth/Llama-3.2-3B-Instruct-bnb-4bit", 
+    max_seq_length=1024, 
     load_in_4bit=True,
-    fast_inference=True, # Re-enabled for GRPO performance
+    fast_inference=True,
     max_lora_rank=16,
 )
 
@@ -85,6 +85,12 @@ training_args = GRPOConfig(
     learning_rate=5e-6,
     per_device_train_batch_size=1,
     gradient_accumulation_steps=4,
+    
+    # ── AGGRESSIVE MEMORY SAVING ──
+    num_generations=4,              # Reduced from 8 (saves 50% generation VRAM)
+    max_prompt_length=512,          # Keep prompts short
+    max_completion_length=256,      # Limit the JSON output length
+    
     max_steps=50,
     logging_steps=5,
     optim="adamw_8bit",
