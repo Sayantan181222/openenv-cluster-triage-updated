@@ -20,8 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # We do not pin versions so pip can cleanly resolve PyTorch 2.6.0 + Torchvision 0.21.0
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
-    "torch==2.5.1" \
-    "torchvision==0.20.1" \
+    "torch==2.10.0" \
+    "torchvision==0.25.0" \
     "torchaudio==2.5.1" \
     --index-url https://download.pytorch.org/whl/cu121
 
