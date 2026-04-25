@@ -1,0 +1,45 @@
+# ── OpenEnv: Split-Brain Collapse — GPU Training Space ────────────────────────
+# This Dockerfile runs the GRPO curriculum training script.
+# Deploy as a separate HF Space with GPU hardware (A10G Small recommended).
+#
+# Env variables to set in Space Secrets:
+#   HF_TOKEN     — your HF write token (to push adapter + plots)
+#   HF_USERNAME  — your HF username (default: Sayantan181222)
+# ──────────────────────────────────────────────────────────────────────────────
+
+FROM pytorch/pytorch:2.2.0-cuda11.8-cudnn8-runtime
+
+WORKDIR /app
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl gcc g++ build-essential \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages
+# Note: unsloth must be installed from source for latest GRPO support
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+        "unsloth[colab] @ git+https://github.com/unslothai/unsloth.git" \
+        trl \
+        datasets \
+        matplotlib \
+        pydantic \
+        networkx \
+        python-dotenv \
+        huggingface_hub \
+        openai \
+        xformers \
+        bitsandbytes
+
+# Copy repo source
+COPY . .
+
+# Create output directories
+RUN mkdir -p plots openenv_outputs openenv-split-brain-lora
+
+# No HEALTHCHECK needed — this is a training job, not a server
+# No EXPOSE — no HTTP server
+
+# Run the curriculum training script
+CMD ["python", "train_unsloth_colab.py"]

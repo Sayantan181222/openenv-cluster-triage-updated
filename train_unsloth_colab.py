@@ -603,10 +603,10 @@ plt.close(fig)
 print("[PLOT] Saved: plots/diagnostic_loop_reduction.png")
 
 
-# ── 12. Save LoRA Adapter ─────────────────────────────────────────────────────
+# ── 12. Save LoRA Adapter locally ────────────────────────────────────────────
 model.save_pretrained(LORA_OUTPUT_DIR)
 tokenizer.save_pretrained(LORA_OUTPUT_DIR)
-print(f"\n[INFO] LoRA adapter saved to '{LORA_OUTPUT_DIR}/'")
+print(f"\n[INFO] LoRA adapter saved locally to '{LORA_OUTPUT_DIR}/'")
 
 # ── 13. Final Summary ─────────────────────────────────────────────────────────
 print("\n" + "="*65)
@@ -620,3 +620,43 @@ print(f"  Net improvement:                 +{total_sr_trained - total_sr_baselin
 print(f"\n  Plots saved to: plots/")
 print(f"  Model saved to: {LORA_OUTPUT_DIR}/")
 print("="*65)
+
+# ── 14. Push LoRA Adapter + Plots to Hugging Face Hub ────────────────────────
+HF_TOKEN     = os.getenv("HF_TOKEN", "").strip()
+HF_USERNAME  = os.getenv("HF_USERNAME", "Sayantan181222")
+ADAPTER_REPO = f"{HF_USERNAME}/openenv-split-brain-lora"
+PLOTS_REPO   = f"{HF_USERNAME}/openenv-split-brain-lora"   # commit plots to same repo
+
+if HF_TOKEN:
+    print(f"\n[INFO] Pushing LoRA adapter to HF Hub: {ADAPTER_REPO}")
+    try:
+        model.push_to_hub(ADAPTER_REPO, token=HF_TOKEN, private=False)
+        tokenizer.push_to_hub(ADAPTER_REPO, token=HF_TOKEN, private=False)
+        print(f"[INFO] ✅ Adapter pushed → https://huggingface.co/{ADAPTER_REPO}")
+    except Exception as e:
+        print(f"[WARN] Adapter push failed: {e}")
+
+    # Push the 3 training plots to the same repo
+    print(f"\n[INFO] Pushing training plots to HF Hub: {PLOTS_REPO}")
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        for plot_file in [
+            "plots/training_reward_curve.png",
+            "plots/task_success_comparison.png",
+            "plots/diagnostic_loop_reduction.png",
+        ]:
+            if os.path.exists(plot_file):
+                api.upload_file(
+                    path_or_fileobj=plot_file,
+                    path_in_repo=plot_file,
+                    repo_id=PLOTS_REPO,
+                    token=HF_TOKEN,
+                )
+                print(f"[INFO] ✅ Uploaded {plot_file}")
+        print(f"\n[INFO] All plots available at: https://huggingface.co/{PLOTS_REPO}/tree/main/plots")
+    except Exception as e:
+        print(f"[WARN] Plot upload failed: {e}")
+else:
+    print("\n[WARN] HF_TOKEN not set — skipping Hub push.")
+    print("       Set HF_TOKEN env variable to auto-push adapter + plots.")
