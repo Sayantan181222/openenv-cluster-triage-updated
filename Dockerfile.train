@@ -18,12 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install PyTorch from the official CUDA 12.1 wheel index (safest for HF Spaces A10G)
 # We do not pin versions so pip can cleanly resolve PyTorch 2.6.0 + Torchvision 0.21.0
+# Note: Use cu128 or cu130 as cu121 is outdated for Torch 2.10+
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
-    "torch==2.5.1" \
-    "torchvision==0.20.1" \
-    "torchaudio==2.5.1" \
-    --index-url https://download.pytorch.org/whl/cu121
+    "torch==2.10.0" \
+    "torchvision==0.25.0" \
+    "torchaudio==2.10.0" \
+    --index-url https://download.pytorch.org/whl/cu128
 
 # ── 2. Install Unsloth + Training Stack (Correct Dependencies) ──────────────
 RUN pip install --no-cache-dir \
