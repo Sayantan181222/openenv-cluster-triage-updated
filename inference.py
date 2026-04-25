@@ -55,7 +55,7 @@ def parse_model_action(response_text: str) -> ClusterAction:
     text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
     text = text.replace("```json", "").replace("```", "").strip()
     
-    match = re.search(r'\{.*?\}', text, re.DOTALL)
+    match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group(0))

@@ -37,7 +37,10 @@ SYSTEM_PROMPTS = {
         "and bandwidth management. You understand Dijkstra's algorithm and failover routing.\n"
         "Your actions: update_route, verify_routing, throttle_bandwidth, delegate (back to orchestrator), noop, run_diagnostic.\n"
         "CRITICAL: Once verify_routing succeeds, your network job is DONE. Do NOT try to fix severed links. "
-        "Delegate back to orchestrator IMMEDIATELY with a status report."
+        "Delegate back to orchestrator IMMEDIATELY with a status report.\n"
+        "REGIONAL WIPEOUT EXCEPTION: The dc1↔dc2 primary link is permanently severed — verify_routing WILL FAIL. "
+        "Your job is ONLY to: (1) throttle dc2_router--dc3_router to 10%, (2) establish the oob_tunnel. "
+        "Once oob_tunnel_active is True in the state, your work is DONE. Delegate back to orchestrator immediately."
     ),
     "dataops": (
         "You are the Data Operations specialist. You manage HDFS storage and NewSQL databases. "
@@ -254,6 +257,9 @@ class SplitBrainEnv:
         if isinstance(action_input, SplitBrainAction):
             return action_input
         if isinstance(action_input, dict):
+            # Convert nested dict instruction_payloads to strings to avoid type validation errors
+            if "instruction_payload" in action_input and isinstance(action_input["instruction_payload"], dict):
+                action_input["instruction_payload"] = json.dumps(action_input["instruction_payload"])
             try:
                 return SplitBrainAction(**action_input)
             except Exception as e:
@@ -266,6 +272,8 @@ class SplitBrainEnv:
             # First try direct JSON parse
             try:
                 data = json.loads(text)
+                if "instruction_payload" in data and isinstance(data["instruction_payload"], dict):
+                    data["instruction_payload"] = json.dumps(data["instruction_payload"])
                 return SplitBrainAction(**data)
             except Exception as e:
                 print(f"[DEBUG PARSE ERROR direct] {e}")
@@ -392,7 +400,7 @@ class SplitBrainEnv:
         # Check delegation ordering for orchestrator
         reward = 0.05
         if actor == "orchestrator":
-            if target == "dataops" and not self.bypass_established:
+            if target == "dataops" and not self.bypass_established and not self.routing_verified:
                 reward = -0.10
                 msg = f"PENALTY: Delegating to DataOps before network is fixed. Network must come first."
             else:
@@ -488,10 +496,14 @@ class SplitBrainEnv:
         eid = action.target_id
         
         if self.current_task == "regional_wipeout" and eid == "oob_tunnel":
+            if self.state_data.oob_tunnel_active:
+                return 0.0, "INFO: OOB tunnel is already active. Delegate to dataops to stop_replication."
             dc2_dc3 = self._find_edge("dc2_router--dc3_router")
             if dc2_dc3 and dc2_dc3.bandwidth_used > 100:
                 return -0.05, "FAIL: DC-Gamma routers dropping packets due to 100% bandwidth saturation."
             self.state_data.oob_tunnel_active = True
+            self.state_data.dc1_dc2_connected = True
+            self.bypass_established = True
             return 0.15, "OOB TUNNEL ESTABLISHED: Low-bandwidth management link to DC-Beta active."
             
         edge = self._find_edge(eid)
@@ -558,19 +570,28 @@ class SplitBrainEnv:
         return 0.05, f"Bandwidth on '{eid}' throttled to {limit}%."
 
     def _handle_stop_replication(self) -> Tuple[float, str]:
-        if random.random() < 0.2:
-            return -0.05, "ERROR: SSH Timeout. Node unresponsive."
-            
-        if self.current_task == "regional_wipeout" and not self.state_data.oob_tunnel_active:
-            return -0.05, "FAIL: Cannot reach DC-Beta. Primary link severed and no OOB tunnel exists."
-            
         hdfs = self.state_data.hdfs
         if not hdfs.replication_storm_active:
-            return 0.0, "INFO: No replication storm active."
+            if not self.routing_verified:
+                return 0.0, "INFO: Replication storm already halted. Routing not yet verified — delegate back to orchestrator so NetOps can verify_routing first."
+            elif not self.stepdown_done:
+                return 0.0, "INFO: Replication storm already halted. Proceed to force_stepdown on dc2."
+            elif not self.ledger_reconciled:
+                return 0.0, "INFO: Stepdown already complete. Proceed to reconcile_ledger now."
+            else:
+                return 0.0, "INFO: All DataOps tasks complete. Delegate back to orchestrator."
+
+        if self.current_task == "regional_wipeout" and not self.state_data.oob_tunnel_active:
+            return -0.05, "FAIL: Cannot reach DC-Beta. Primary link severed and no OOB tunnel exists."
+
+        if random.random() < 0.2:
+            return -0.05, "ERROR: SSH Timeout. Node unresponsive."
+
         hdfs.replication_storm_active = False
         hdfs.io_bandwidth_used_pct = 20.0
         self.storm_killed = True
-        return 0.15, "REPLICATION STORM HALTED ✓ I/O bandwidth released."
+        return 0.15, "REPLICATION STORM HALTED ✓ I/O bandwidth released. Next: force_stepdown on dc2."
+
 
     def _handle_tune_hdfs(self, action: SplitBrainAction) -> Tuple[float, str]:
         hdfs = self.state_data.hdfs
@@ -592,7 +613,9 @@ class SplitBrainEnv:
             return -0.05, "ERROR: SSH Timeout. Node unresponsive."
         db = self.state_data.newsql
         if not db.split_brain_active:
-            return 0.0, "INFO: No split-brain — database is healthy."
+            if self.stepdown_done and not self.ledger_reconciled:
+                return 0.0, "INFO: Stepdown already complete. Proceed to reconcile_ledger now."
+            return 0.0, "INFO: No split-brain — database is healthy. Delegate back to orchestrator."
         if not self.state_data.dc1_dc2_connected:
             return -0.15, "FAIL: Cannot force stepdown — DCs not connected. Fix network first."
         target_dc = action.target_id or "dc2"

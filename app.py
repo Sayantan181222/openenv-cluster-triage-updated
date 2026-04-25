@@ -182,7 +182,7 @@ def _extract_action(response_text: str) -> ClusterAction:
     """Parse LLM output into a ClusterAction, stripping reasoning blocks."""
     text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
     text = text.replace("```json", "").replace("```", "").strip()
-    match = re.search(r'\{.*?\}', text, re.DOTALL)
+    match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group(0))
@@ -236,9 +236,11 @@ EXAMPLE:
 {{"action_type": "kill_job", "target_id": "job_rogue_99"}}
 """
 
-    # Auto-select model: use fine-tuned LoRA model for split_brain if available
+    # Auto-select model: use fine-tuned LoRA model for cascading_deadlock
+    # (Because the LoRA was aggressively trained to penalize run_diagnostic,
+    # using it on regional_wipeout causes it to output 'noop' instead).
     active_model = MODEL_NAME
-    if body.agent_id == "split_brain" and SPLIT_BRAIN_MODEL:
+    if body.agent_id == "split_brain" and SPLIT_BRAIN_MODEL and getattr(env, "current_task", "") == "cascading_deadlock":
         active_model = SPLIT_BRAIN_MODEL
         print(f"[INFO] Using fine-tuned model: {active_model}")
 

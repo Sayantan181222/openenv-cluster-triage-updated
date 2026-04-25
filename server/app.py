@@ -6,7 +6,7 @@ import uvicorn
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import the fully mounted FastAPI + Gradio app from the root app.py
-from app import app
+from app import fastapi_app as app
 
 def main():
     """Entry point required by the OpenEnv validator."""
