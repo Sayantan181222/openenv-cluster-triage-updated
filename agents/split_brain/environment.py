@@ -539,6 +539,21 @@ class SplitBrainEnv:
         if not edge:
             return -0.05, f"WARN: Edge '{eid}' not found."
         limit = (action.parameters or {}).get("limit_pct", 50)
+
+        # Regional Wipeout: The OOB tunnel requires bandwidth_used <= 100.
+        # bandwidth_used = capacity * (limit/100), so limit must be <= 10%.
+        # Give explicit corrective feedback if the LLM uses a bad value.
+        if self.current_task == "regional_wipeout" and eid == "dc2_router--dc3_router":
+            if limit > 10:
+                edge.bandwidth_used = edge.bandwidth_capacity * (limit / 100.0)
+                return -0.05, (
+                    f"Bandwidth on '{eid}' throttled to {limit}%, but this is NOT ENOUGH. "
+                    f"Current bandwidth: {edge.bandwidth_used:.0f}Mbps. "
+                    f"OOB tunnel requires bandwidth BELOW 100Mbps. "
+                    f"You MUST set limit_pct to 10 or lower. "
+                    f"Use: {{\"action_type\": \"throttle_bandwidth\", \"target_id\": \"{eid}\", \"parameters\": {{\"limit_pct\": 10}}}}"
+                )
+
         edge.bandwidth_used = edge.bandwidth_capacity * (limit / 100.0)
         return 0.05, f"Bandwidth on '{eid}' throttled to {limit}%."
 
@@ -708,6 +723,20 @@ class SplitBrainEnv:
                 "  reach dc2 to stop the storm (link severed). Standard routing WILL FAIL.\n"
                 "- Valid inter-DC edges: dc1_router--dc3_router, dc2_router--dc3_router, dc1_router--dc2_router\n"
                 "- Special target_id: 'oob_tunnel' (creates a management link, but only works AFTER dc3 bandwidth is throttled below 100)\n"
+                "\n"
+                "EXACT STEP-BY-STEP SEQUENCE FOR NETOPS:\n"
+                "  Step A: throttle_bandwidth on dc2_router--dc3_router with limit_pct=10 (MUST be 10, NOT 50 or 90!)\n"
+                "          JSON: {\"action_type\": \"throttle_bandwidth\", \"target_id\": \"dc2_router--dc3_router\", \"parameters\": {\"limit_pct\": 10}}\n"
+                "  Step B: update_route with target_id 'oob_tunnel' (only works after Step A)\n"
+                "          JSON: {\"action_type\": \"update_route\", \"target_id\": \"oob_tunnel\"}\n"
+                "  Step C: verify_routing\n"
+                "  Step D: delegate back to orchestrator\n"
+                "\n"
+                "EXACT STEP-BY-STEP SEQUENCE FOR DATAOPS:\n"
+                "  Step E: stop_replication (only works after OOB tunnel is active)\n"
+                "  Step F: force_stepdown on dc2\n"
+                "  Step G: reconcile_ledger\n"
+                "  Step H: delegate back to orchestrator\n"
                 "\nCRITICAL INSTRUCTION FOR ALL AGENTS: You MUST strictly obey the DELEGATION CONTEXT. "
                 "Do exactly what the delegation context tells you to do, and nothing else. "
                 "Do not skip steps. Do not guess future steps."
