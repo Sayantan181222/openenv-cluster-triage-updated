@@ -1,0 +1,32 @@
+name: Sync to Hugging Face Hub
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      # HF Spaces always reads a file named exactly "Dockerfile".
+      # We rename Dockerfile.train → Dockerfile before pushing so the
+      # training Space picks up the correct GPU image, not the API server.
+      - name: Swap Dockerfile for training Space
+        run: |
+          cp Dockerfile Dockerfile.api          # keep original as backup
+          cp Dockerfile.train Dockerfile        # training image becomes THE Dockerfile
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name  "GitHub Actions"
+          git add Dockerfile
+          git commit -m "ci: use Dockerfile.train for HF training Space" || echo "nothing to commit"
+          git push --force https://Sayantan181222:$HF_TOKEN@huggingface.co/spaces/Sayantan181222/split-brain-training main
