@@ -623,7 +623,7 @@ print("="*65)
 
 # ── 14. Push LoRA Adapter + Plots to Hugging Face Hub ────────────────────────
 HF_TOKEN     = os.getenv("HF_TOKEN", "").strip()
-HF_USERNAME  = os.getenv("HF_USERNAME", "soon_valley")
+HF_USERNAME  = os.getenv("HF_USERNAME", "soonvalley04")
 ADAPTER_REPO = f"{HF_USERNAME}/openenv-split-brain-lora"
 PLOTS_REPO   = f"{HF_USERNAME}/openenv-split-brain-lora"   # commit plots to same repo
 

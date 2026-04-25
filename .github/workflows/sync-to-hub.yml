@@ -29,4 +29,4 @@ jobs:
           git config user.name  "GitHub Actions"
           git add Dockerfile
           git commit -m "ci: use Dockerfile.train for HF training Space" || echo "nothing to commit"
-          git push --force https://soon_valley:$HF_TOKEN@huggingface.co/spaces/soon_valley/split-brain-training main
+          git push --force https://soonvalley04:$HF_TOKEN@huggingface.co/spaces/soonvalley04/split-brain-training main
