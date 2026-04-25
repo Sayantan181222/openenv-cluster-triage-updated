@@ -19,23 +19,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install PyTorch from the official CUDA 12.1 wheel index (safest for HF Spaces A10G)
 # We do not pin versions so pip can cleanly resolve PyTorch 2.6.0 + Torchvision 0.21.0
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    pip install --no-cache-dir \
+    "torch==2.5.1" \
+    "torchvision==0.20.1" \
+    "torchaudio==2.5.1" \
+    --index-url https://download.pytorch.org/whl/cu121
 
 # Install Unsloth and other dependencies in a single block without strict pins
 # so pip can perfectly align xformers, torchao, and trl with PyTorch 2.6.0.
 RUN pip install --no-cache-dir \
-        "unsloth @ git+https://github.com/unslothai/unsloth.git" \
-        unsloth_zoo \
-        trl \
-        datasets \
-        matplotlib \
-        pydantic \
-        networkx \
-        python-dotenv \
-        huggingface_hub \
-        openai \
-        bitsandbytes \
-        xformers
+    "unsloth @ git+https://github.com/unslothai/unsloth.git" \
+    unsloth_zoo \
+    trl \
+    datasets \
+    matplotlib \
+    pydantic \
+    networkx \
+    python-dotenv \
+    huggingface_hub \
+    openai \
+    bitsandbytes \
+    xformers
 
 # Copy repo source
 COPY . .
