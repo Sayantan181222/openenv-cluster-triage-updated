@@ -30,7 +30,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
         huggingface_hub \
         openai \
         xformers \
-        bitsandbytes
+        bitsandbytes \
+        torchvision \
+        torchaudio
 
 # Copy repo source
 COPY . .
