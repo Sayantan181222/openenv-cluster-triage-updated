@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Note: unsloth must be installed from source for latest GRPO support
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
-        "unsloth[colab] @ git+https://github.com/unslothai/unsloth.git" \
+        "unsloth @ git+https://github.com/unslothai/unsloth.git" \
         trl \
         datasets \
         matplotlib \
