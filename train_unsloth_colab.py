@@ -13,20 +13,18 @@ from trl import GRPOConfig, GRPOTrainer
 import re
 import json
 
-# Import your OpenEnv Environment
-# Note: You must upload your 'agents' folder and 'models.py' to the Colab instance!
-from agents.cluster_triage.environment import ClusterTriageEnv
-from agents.cluster_triage.models import ClusterAction
+# Import the Split-Brain Environment (where the 8B model struggled)
+from agents.split_brain.environment import SplitBrainEnv
+from agents.split_brain.models import SplitBrainAction
 
 # --- 1. Load the Model via Unsloth ---
 max_seq_length = 2048
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="unsloth/Llama-3.2-1B-Instruct", # Fast minimal model for Colab
+    model_name="unsloth/Meta-Llama-3.1-8B-Instruct", # Changed to Llama-3.1-8B
     max_seq_length=max_seq_length,
     load_in_4bit=True,
-    fast_inference=True,
+    fast_inference=False, # <-- CHANGED: Disabled vLLM to fix the graph compile crash
     max_lora_rank=16,
-    gpu_memory_utilization=0.6,
 )
 
 model = FastLanguageModel.get_peft_model(
@@ -38,34 +36,40 @@ model = FastLanguageModel.get_peft_model(
 )
 
 # --- 2. Define the OpenEnv Reward Function ---
-# GRPO evaluates multiple completions from the LLM and rewards them.
-# We will spin up the environment, pass the LLM's action, and return the reward!
-
 def openenv_reward_function(prompts, completions, **kwargs):
     rewards = []
     
     for prompt, completion in zip(prompts, completions):
-        # 1. Initialize a fresh environment for this generation
-        env = ClusterTriageEnv()
-        obs = env.reset(task="easy") # Train on the easy task first
+        # 1. Initialize the specific Split-Brain environment
+        env = SplitBrainEnv()
+        obs = env.reset(task=4) # Task 4 is the one that was failing!
         
         # 2. Extract the JSON action from the LLM's completion
         action_text = completion[0]['content']
         match = re.search(r'\{.*?\}', action_text, re.DOTALL)
         
-        step_reward = -0.5 # Default penalty for invalid formatting
+        step_reward = -0.5 # Default penalty for invalid JSON formatting
         if match:
             try:
                 data = json.loads(match.group(0))
-                action = ClusterAction(**data)
+                # Add the active agent context since split_brain requires it
+                if "agent" not in data:
+                    data["agent"] = "netops" 
                 
-                # 3. Step the environment!
+                action = SplitBrainAction(**data)
+                
+                # 3. Step the environment
                 result = env.step(action)
                 step_reward = result.reward
                 
-                # Bonus for actually solving the task
-                if result.done and result.observation.health_score == 1.0:
-                    step_reward += 2.0
+                # Bonus for breaking out of the loop and solving it
+                if result.done:
+                    step_reward += 5.0
+                    
+                # Heavy penalty for infinite diagnostic loop
+                if action.action_type == "run_diagnostic":
+                    step_reward -= 0.5 
+                    
             except Exception:
                 pass
                 
@@ -74,12 +78,11 @@ def openenv_reward_function(prompts, completions, **kwargs):
     return rewards
 
 # --- 3. Create Training Dataset ---
-# We provide the LLM with the initial observation to kick off the generation.
-dummy_env = ClusterTriageEnv()
-init_obs = dummy_env.reset(task="easy")
+dummy_env = SplitBrainEnv()
+init_obs = dummy_env.reset(task=4)
 
-system_prompt = "You are an automated DevOps system. Output EXACTLY ONE JSON object."
-user_prompt = f"CURRENT CLUSTER STATE:\n{init_obs.model_dump_json(indent=2)}\n\nValid actions: kill_job, restart_node, clear_temp_storage, noop.\nProvide your action in JSON:"
+system_prompt = "You are the netops agent. You MUST output EXACTLY ONE JSON object."
+user_prompt = f"CURRENT STATE:\n{init_obs.model_dump_json(indent=2)}\n\nRECENT EVENTS: Orchestrator delegated to netops. DIAGNOSTIC: dc1_router--dc2_switch is degraded. Use update_route on dc1_router--dc2_switch.\n\nValid actions: update_route, verify_routing, throttle_bandwidth, delegate, noop, run_diagnostic.\nProvide your action in JSON:"
 
 from datasets import Dataset
 dataset = Dataset.from_list([
