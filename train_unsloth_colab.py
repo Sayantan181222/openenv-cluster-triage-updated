@@ -77,7 +77,7 @@ os.makedirs("openenv_outputs", exist_ok=True)
 # ── 1. Config ─────────────────────────────────────────────────────────────────
 BASE_MODEL      = "unsloth/Llama-3.2-3B-Instruct-bnb-4bit"
 LORA_OUTPUT_DIR = "openenv-split-brain-lora"
-MAX_SEQ_LENGTH  = 1024
+MAX_SEQ_LENGTH  = 4096
 LORA_RANK       = 16
 EVAL_EPISODES   = 5
 
@@ -659,7 +659,8 @@ for stage_idx, (task_id, grpo_steps, num_prompts) in enumerate(CURRICULUM):
         per_device_train_batch_size = 1,
         gradient_accumulation_steps = 4,
         num_generations             = 6,           # increased from 4 → more variance per step
-        max_completion_length       = 150,
+        max_completion_length       = 256,
+        max_prompt_length = 3840,
         max_steps                   = grpo_steps,
         logging_steps               = 5,
         save_steps                  = grpo_steps,
